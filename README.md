@@ -34,12 +34,14 @@ deterministic checkers, so there is nothing to memorize.
 ## Game rules (short version)
 
 - N players; some are **Impostors**, the rest **Crewmates**.
-- **Action phase** each round: crewmates attempt their current task (a capability
-  test); everyone moves between connected rooms; impostors fake tasks and may kill
-  a co-located crewmate (with a cooldown). Perception is **partial-observability** —
-  each player only knows what it personally witnesses (who shares its room, who
-  enters/leaves, who appears to do tasks, and any kill it sees), and reasons over
-  that personal memory. Killing in front of a witness gets you caught.
+- **Action phase** each round: players take turns in a shuffled order — each
+  moves, then does/fakes a task or kills. Perception is **partial-observability
+  with sequential timing**: a player only knows what it personally witnesses, and
+  witnesses are recorded in true chronological order (tagged `R<round>.<tick>`),
+  so memory captures reads like "Green left for Upper Engine, then Pink followed,
+  then the body was found there." Impostors fake tasks to build alibis and must
+  isolate targets — killing in front of a witness gets you caught. A body found
+  mid-round ends the round and triggers a meeting immediately.
 - When a living player shares a room with a body, an **emergency meeting** starts:
   agents discuss for a few turns, then **vote** to eject someone (or skip; ties
   and skip-pluralities eject no one).
