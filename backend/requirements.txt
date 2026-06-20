@@ -1,0 +1,12 @@
+# Web server
+fastapi>=0.110
+uvicorn[standard]>=0.29
+websockets>=12.0
+
+# LLM providers
+anthropic>=0.40           # Claude players
+openai>=1.40              # OpenAI, OpenRouter, and Ollama players (OpenAI-compatible)
+
+# Testing
+pytest>=8.0
+pytest-asyncio>=0.23
