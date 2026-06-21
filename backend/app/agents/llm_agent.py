@@ -13,6 +13,29 @@ from .base import Agent
 from .providers.base import ChatMessage, LLMClient, LLMError
 
 
+def _reasoning(reply: str, limit: int = 240) -> str:
+    """The model's rationale = its reply minus the final `ANSWER:` line."""
+    lines = [ln for ln in reply.splitlines() if not ln.strip().upper().startswith("ANSWER")]
+    text = " ".join(ln.strip() for ln in lines if ln.strip())
+    return text[:limit].strip()
+
+
+def _parse_action(reply: str, targets: list[str], vent_targets: list[str], can_sabotage: bool) -> str:
+    """Normalize an impostor's free-form choice into an action token."""
+    ans = extract_answer(reply).lower()
+    if can_sabotage and "sabotage" in ans:
+        kind = "comms" if "comm" in ans else "lights"
+        return f"sabotage {kind}"
+    if "vent" in ans:
+        for r in vent_targets:
+            if r.lower() in ans:
+                return f"vent {r}"
+    for t in targets:  # explicit kill, or just naming a target
+        if t.lower() in ans:
+            return f"kill {t}"
+    return "pass"
+
+
 def _match_choice(reply: str, options: list[str], default: str) -> str:
     """Map a free-form reply onto one of ``options`` (case-insensitive)."""
     ans = extract_answer(reply).lower().strip(".!? ")
@@ -46,22 +69,31 @@ class LLMAgent(Agent):
         reply = await self._ask(
             prompts.move_prompt(current, options, present, memory), max_tokens=140
         )
+        self.last_reasoning = _reasoning(reply)
         return _match_choice(reply, options, default="stay")
 
-    async def decide_kill(self, targets, others_here, room, memory) -> str:
+    async def decide_impostor_action(
+        self, room, targets, others_here, vent_targets, can_sabotage, memory
+    ) -> str:
         reply = await self._ask(
-            prompts.kill_prompt(targets, others_here, room, memory), max_tokens=140
+            prompts.impostor_action_prompt(
+                room, targets, others_here, vent_targets, can_sabotage, memory
+            ),
+            max_tokens=160,
         )
-        return _match_choice(reply, targets, default="pass")
+        self.last_reasoning = _reasoning(reply)
+        return _parse_action(reply, targets, vent_targets, can_sabotage)
 
     async def discuss(self, memory, transcript, alive) -> str:
         reply = await self._ask(
             prompts.discussion_prompt(memory, transcript, alive), max_tokens=180
         )
+        self.last_reasoning = ""  # the chat message itself is the public statement
         return reply.strip() or "I don't have anything concrete yet."
 
     async def vote(self, memory, transcript, alive) -> str:
         reply = await self._ask(
             prompts.vote_prompt(memory, transcript, alive), max_tokens=120
         )
+        self.last_reasoning = _reasoning(reply)
         return _match_choice(reply, alive + ["skip"], default="skip")

@@ -7,8 +7,8 @@ import {
 } from "./api.js";
 
 const EMPTY_GAME = {
-  map: {}, players: {}, chat: [], feed: [],
-  round: 0, phase: "lobby", winner: null, reason: "", reveal: null,
+  map: {}, players: {}, chat: [], feed: [], thoughts: [],
+  round: 0, phase: "lobby", winner: null, reason: "", reveal: null, sabotage: null,
 };
 
 const DEFAULT_CONFIG = {
@@ -67,9 +67,25 @@ export default function App() {
           next.reveal = null;
           return next;
         }
-        case "move": {
+        case "phase_change": {
+          next.sabotage = null; // sabotage is fixed between rounds
+          break;
+        }
+        case "move":
+        case "vent": {
           const p = next.players[d.player];
           if (p) next.players = { ...next.players, [d.player]: { ...p, location: d.to } };
+          break;
+        }
+        case "sabotage": {
+          next.sabotage = d.kind;
+          break;
+        }
+        case "thought": {
+          next.thoughts = [
+            ...g.thoughts,
+            { actor: d.actor, action: d.action, text: d.text },
+          ].slice(-80);
           break;
         }
         case "task_result": {
@@ -110,8 +126,8 @@ export default function App() {
         default:
           break;
       }
-      // Append to feed (skip moves to keep it readable; they show on the map).
-      if (ev.type !== "move") {
+      // Append to feed (skip moves + thoughts; those have their own surfaces).
+      if (ev.type !== "move" && ev.type !== "thought") {
         next.feed = [...g.feed, { type: ev.type, message: ev.message }].slice(-200);
       }
       return next;

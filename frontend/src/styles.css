@@ -143,8 +143,21 @@ code { background: #0c1322; padding: 1px 5px; border-radius: 4px; font-size: 12p
 .fline.kill { background: #2a0d0d; }
 .fline.ejection { background: #2a1f0d; }
 .fline.body_reported { background: #2a1010; }
+.fline.vent { background: #1a1030; }
+.fline.sabotage { background: #2a1f0d; }
 .fline.game_end { background: #0d2a1a; font-weight: 600; }
 .ficon { width: 18px; }
+
+/* Agent reasoning (thoughts) */
+.thoughts { background: var(--panel-solid); border: 1px solid #3a2d5a; border-radius: 12px; padding: 14px; }
+.thoughts h3 { margin: 0 0 8px; font-size: 14px; }
+.thoughts-body { max-height: 220px; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; }
+.thought { display: flex; gap: 7px; align-items: baseline; font-size: 13px; }
+.tspk { font-weight: 700; min-width: 50px; }
+.taction { font-size: 10px; text-transform: uppercase; color: var(--muted); border: 1px solid var(--line); border-radius: 999px; padding: 0 6px; }
+.ttext { color: #cbb8f0; font-style: italic; }
+.pill.sabotage { background: #4a2a0d; border-color: #d08a1f; text-transform: capitalize; }
+.tiny-btn { margin-left: auto; padding: 4px 10px; font-size: 12px; }
 
 .board { width: 100%; border-collapse: collapse; margin-top: 10px; }
 .board th, .board td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); font-size: 14px; }

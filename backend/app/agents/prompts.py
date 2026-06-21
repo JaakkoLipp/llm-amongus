@@ -73,22 +73,43 @@ def move_prompt(current: str, options: list[str], present: list[str], memory: li
     )
 
 
-def kill_prompt(targets: list[str], others_here: list[str], room: str, memory: list[str]) -> str:
-    others = ", ".join(others_here)
-    safe = len(others_here) == 1
-    note = (
-        "You are ALONE with one crewmate — a kill here leaves no witnesses (safe)."
-        if safe else
-        "If you kill one, everyone ELSE still in the room witnesses it and can "
-        "expose you. That is very risky."
+def impostor_action_prompt(
+    room: str,
+    targets: list[str],
+    others_here: list[str],
+    vent_targets: list[str],
+    can_sabotage: bool,
+    memory: list[str],
+) -> str:
+    others = ", ".join(others_here) if others_here else "no one"
+    tline = (
+        f"Crewmates you could kill here: {', '.join(targets)}."
+        if targets else
+        "You cannot kill right now (no crewmate here, or kill on cooldown)."
+    )
+    kill_note = (
+        " You are alone with one crewmate — a kill leaves no witnesses (safe)."
+        if len(others_here) == 1 and targets else
+        " Killing while others are present means they witness it and expose you."
+    )
+    sab = (
+        "\n- 'sabotage lights' — blind all crewmates for the rest of this round "
+        "(great cover for a kill or escape).\n- 'sabotage comms' — block body "
+        "reports and meetings for the rest of this round."
+        if can_sabotage else ""
     )
     return (
-        f"You are the impostor in {room}. Everyone here with you: {others}.\n"
-        f"Crewmates you could eliminate: {', '.join(targets)}.\n"
-        f"{note}\n\n"
+        f"You are the impostor in {room}. Others here: {others}.\n"
+        f"{tline}{kill_note}\n\n"
+        "Your options:\n"
+        f"- 'kill <name>' — eliminate a crewmate listed above.\n"
+        f"- 'vent <room>' — move SECRETLY to one of: {', '.join(vent_targets)} "
+        "(no one sees you leave or arrive, UNLESS someone is in this room — they'll "
+        "catch you venting)." + sab + "\n"
+        "- 'pass' — fake a task to look busy.\n\n"
         f"What you've noticed so far:\n{_memory_block(memory, 20)}\n\n"
-        "Reply with the exact target name to kill now, or 'pass'.\n"
-        "Put your decision on a line as `ANSWER: <name or pass>`."
+        "Choose one. Put it on a line as `ANSWER: <choice>` "
+        "(e.g. `ANSWER: kill Blue`, `ANSWER: vent Reactor`, `ANSWER: pass`)."
     )
 
 

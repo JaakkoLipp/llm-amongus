@@ -1,4 +1,4 @@
-import React, { useEffect, useRef } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { COLORS } from "./GameSetup.jsx";
 
 function Dot({ name, dead }) {
@@ -89,10 +89,32 @@ function ChatPanel({ chat }) {
   );
 }
 
+function ThoughtsPanel({ thoughts }) {
+  const end = useRef(null);
+  useEffect(() => end.current?.scrollIntoView({ behavior: "smooth" }), [thoughts]);
+  return (
+    <div className="thoughts">
+      <h3>🧠 Agent reasoning <span className="muted small">(private — spoilers)</span></h3>
+      <div className="thoughts-body">
+        {thoughts.length === 0 && <p className="muted small">No thoughts yet.</p>}
+        {thoughts.map((t, i) => (
+          <div className="thought" key={i}>
+            <span className="dot small" style={{ background: COLORS[t.actor] }} />
+            <span className="tspk">{t.actor}</span>
+            <span className="taction">{t.action}</span>
+            <span className="ttext">{t.text}</span>
+          </div>
+        ))}
+        <div ref={end} />
+      </div>
+    </div>
+  );
+}
+
 const ICON = {
   task_result: "🧩", kill: "🔪", body_reported: "🚨", vote: "🗳️",
   ejection: "🚪", move: "🚶", chat: "💬", game_end: "🏁", meeting_start: "📣",
-  phase_change: "⏱️", game_start: "🚀",
+  phase_change: "⏱️", game_start: "🚀", vent: "🟪", sabotage: "⚠️",
 };
 
 function EventFeed({ feed }) {
@@ -115,17 +137,22 @@ function EventFeed({ feed }) {
 }
 
 export default function GameView({ game }) {
-  const { map, players, chat, feed, round, phase, winner, reason } = game;
+  const { map, players, chat, feed, thoughts, round, phase, winner, reason, sabotage } = game;
+  const [showThoughts, setShowThoughts] = useState(true);
   return (
     <div className="gameview">
       <div className="status-bar">
         <span className="pill">Round {round}</span>
         <span className={`pill phase-${phase}`}>{phase}</span>
+        {sabotage && <span className="pill sabotage">⚠️ {sabotage} sabotaged</span>}
         {winner && (
           <span className={`pill win ${winner}`}>
             {winner === "impostors" ? "🔴 Impostors win" : "🔵 Crewmates win"} — {reason}
           </span>
         )}
+        <button className="btn ghost tiny-btn" onClick={() => setShowThoughts((s) => !s)}>
+          {showThoughts ? "Hide reasoning" : "Show reasoning"}
+        </button>
       </div>
       <div className="cols">
         <div className="col-left">
@@ -133,6 +160,7 @@ export default function GameView({ game }) {
           <PlayerList players={players} reveal={game.reveal} />
         </div>
         <div className="col-right">
+          {showThoughts && <ThoughtsPanel thoughts={thoughts} />}
           <ChatPanel chat={chat} />
           <EventFeed feed={feed} />
         </div>

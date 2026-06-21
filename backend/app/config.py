@@ -112,6 +112,8 @@ class GameConfig:
     discussion_rounds: int = 2
     # Rounds an impostor must wait between kills.
     kill_cooldown: int = 1
+    # Rounds an impostor must wait between sabotages.
+    sabotage_cooldown: int = 2
     # Seconds to pause between emitted events when streaming a game to spectators.
     # 0 in eval/headless mode; small positive value makes the web UI watchable.
     event_delay: float = float(os.environ.get("AMONGLLM_EVENT_DELAY", "0.0"))

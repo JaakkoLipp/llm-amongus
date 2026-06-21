@@ -71,6 +71,7 @@ class GameEngine:
         self.tasks: dict[str, list[Task]] = {}
         self.bodies: dict[str, tuple[str, str]] = {}  # victim -> (room, killer)
         self.memory: dict[str, list[str]] = {}        # player -> personal log
+        self.sabotage: str | None = None              # "lights" | "comms" | None (this round)
         self.event_count = 0
 
     # -- helpers ---------------------------------------------------------------
@@ -85,6 +86,23 @@ class GameEngine:
 
     def _remember(self, player: str, text: str) -> None:
         self.memory.setdefault(player, []).append(f"R{self.round}.{self.tick}: {text}")
+
+    def _observe(self, observer: Player, text: str) -> None:
+        """Record something a player *witnesses*. Under a 'lights' sabotage,
+        crewmates are blind and record nothing they see (impostors still can)."""
+        if self.sabotage == "lights" and observer.role == Role.CREWMATE:
+            return
+        self._remember(observer.name, text)
+
+    async def _emit_thought(self, name: str, action: str) -> None:
+        """Stream an agent's private rationale to spectators (omniscient view)."""
+        reasoning = (getattr(self.agents[name], "last_reasoning", "") or "").strip()
+        if not reasoning:
+            return
+        await self._emit(
+            EventType.THOUGHT, f"{name} (thinking): {reasoning}",
+            actor=name, action=action, text=reasoning, private=True,
+        )
 
     def alive(self) -> list[Player]:
         return [p for p in self.players.values() if p.alive]
@@ -137,10 +155,10 @@ class GameEngine:
             return
         origin = actor.location
         for q in self._occupants(origin, exclude=actor.name):
-            self._remember(q.name, f"saw {actor.name} leave {origin} toward {choice}")
+            self._observe(q, f"saw {actor.name} leave {origin} toward {choice}")
         actor.location = choice
         for q in self._occupants(choice, exclude=actor.name):
-            self._remember(q.name, f"saw {actor.name} arrive in {choice}")
+            self._observe(q, f"saw {actor.name} arrive in {choice}")
         here = [p.name for p in self._occupants(choice, exclude=actor.name)]
         self._remember(actor.name, f"moved {origin}->{choice}; here now: {', '.join(here) or 'no one'}")
         await self._emit(
@@ -161,7 +179,7 @@ class GameEngine:
             actor.tasks_completed += 1
         self._remember(actor.name, f"did a real task in {actor.location}")
         for q in self._occupants(actor.location, exclude=actor.name):
-            self._remember(q.name, f"saw {actor.name} doing a task in {actor.location}")
+            self._observe(q, f"saw {actor.name} doing a task in {actor.location}")
         await self._emit(
             EventType.TASK_RESULT,
             f"{actor.name} {'completed' if att.correct else 'failed'} a "
@@ -177,7 +195,7 @@ class GameEngine:
             return
         self._remember(actor.name, f"pretended to do a task in {actor.location}")
         for q in self._occupants(actor.location, exclude=actor.name):
-            self._remember(q.name, f"saw {actor.name} doing a task in {actor.location}")
+            self._observe(q, f"saw {actor.name} doing a task in {actor.location}")
 
     async def _commit_kill(self, actor: Player, choice: str) -> bool:
         if actor.kill_cooldown > 0:
@@ -192,7 +210,7 @@ class GameEngine:
         self.evaluator.record_kill(actor.model)
         witnesses = [p for p in self._occupants(actor.location) if p.name != actor.name]
         for w in witnesses:
-            self._remember(w.name, f"WITNESSED {actor.name} kill {victim.name} in {actor.location}!")
+            self._observe(w, f"WITNESSED {actor.name} kill {victim.name} in {actor.location}!")
         self._remember(
             actor.name,
             f"killed {victim.name} in {actor.location} "
@@ -206,6 +224,33 @@ class GameEngine:
         )
         return True
 
+    async def _commit_vent(self, actor: Player, dest: str) -> bool:
+        if dest not in game_map.neighbors(actor.location):
+            return False
+        origin = actor.location
+        # Anyone in the origin catches the vent (a strong tell) — unless blinded.
+        for w in self._occupants(origin, exclude=actor.name):
+            self._observe(w, f"saw {actor.name} use a vent in {origin}!")
+        actor.location = dest  # silent arrival: no destination observations
+        self._remember(actor.name, f"vented {origin}->{dest}")
+        await self._emit(
+            EventType.VENT, f"{actor.name} vented to {dest}",
+            player=actor.name, private=True, **{"from": origin, "to": dest},
+        )
+        return True
+
+    async def _commit_sabotage(self, actor: Player, kind: str) -> None:
+        kind = "comms" if "comm" in kind else "lights"
+        self.sabotage = kind
+        actor.sabotage_cooldown = self.config.sabotage_cooldown + 1
+        # Sabotage is public but anonymous — everyone notices, no one sees who.
+        for p in self.alive():
+            self._remember(p.name, f"the {kind} were sabotaged (by someone unknown)")
+        await self._emit(
+            EventType.SABOTAGE, f"The {kind} were sabotaged!",
+            kind=kind, by=actor.name,  # `by` is spectator-only metadata
+        )
+
     async def _decide_act(self, actor: Player):
         """Make (but don't apply) an actor's post-move action. Returns an intent."""
         if actor.role == Role.CREWMATE:
@@ -215,28 +260,39 @@ class GameEngine:
             raw = await self.agents[actor.name].act_task(task)
             return ("task", task, raw)
         others = self._occupants(actor.location, exclude=actor.name)
-        targets = [o for o in others if o.role == Role.CREWMATE]
-        if actor.kill_cooldown > 0 or not targets:
-            return ("fake",)
-        choice = await self.agents[actor.name].decide_kill(
-            [t.name for t in targets], [o.name for o in others], actor.location,
-            self.memory[actor.name],
+        killable = [] if actor.kill_cooldown > 0 else [o.name for o in others if o.role == Role.CREWMATE]
+        vent_targets = game_map.neighbors(actor.location)
+        can_sabotage = self.sabotage is None and actor.sabotage_cooldown == 0
+        token = await self.agents[actor.name].decide_impostor_action(
+            actor.location, killable, [o.name for o in others], vent_targets,
+            can_sabotage, self.memory[actor.name],
         )
-        return ("kill", choice)
+        return ("imp", token)
 
     async def _apply_act(self, actor: Player, decision: tuple) -> None:
         kind = decision[0]
         if kind == "task":
             await self._commit_task(actor, decision[1], decision[2])
-        elif kind == "kill":
-            if not await self._commit_kill(actor, decision[1]):
-                await self._fake_task(actor)  # kill fell through; just look busy
-        elif kind == "fake":
+            return
+        if kind != "imp":
+            return  # "idle": finished crewmate does nothing
+        verb, _, arg = decision[1].partition(" ")
+        if verb == "kill":
+            if not await self._commit_kill(actor, arg.strip()):
+                await self._fake_task(actor)
+        elif verb == "vent":
+            if not await self._commit_vent(actor, arg.strip()):
+                await self._fake_task(actor)
+        elif verb == "sabotage":
+            await self._commit_sabotage(actor, arg.strip())
+        else:
             await self._fake_task(actor)
-        # "idle": finished crewmate does nothing this turn
 
     def _scan_for_report(self) -> tuple[str, str, str] | None:
-        """A body is discovered when a living non-killer shares its room."""
+        """A body is discovered when a living non-killer shares its room.
+        Sabotaged comms suppress reports until the round ends."""
+        if self.sabotage == "comms":
+            return None
         for victim, (room, killer) in list(self.bodies.items()):
             finders = [p for p in self.alive() if p.location == room and p.name != killer]
             if finders:
@@ -265,6 +321,8 @@ class GameEngine:
             self.tick += 1
 
             # MOVE: decide concurrently (overlapping LLM calls), apply in order.
+            for a in chosen:
+                self.agents[a.name].last_reasoning = ""
             move_choices = await asyncio.gather(*(
                 self.agents[a.name].decide_move(
                     a.location, game_map.neighbors(a.location),
@@ -275,14 +333,18 @@ class GameEngine:
             ))
             for actor, choice in zip(chosen, move_choices):
                 await self._apply_move(actor, choice)
+                await self._emit_thought(actor.name, "move")
 
             # ACT: decide concurrently (post-move), apply in order with re-validation.
             actors = [a for a in chosen if a.alive]
+            for a in actors:
+                self.agents[a.name].last_reasoning = ""
             decisions = await asyncio.gather(*(self._decide_act(a) for a in actors))
             for actor, decision in zip(actors, decisions):
                 if not actor.alive:
                     continue
                 await self._apply_act(actor, decision)
+                await self._emit_thought(actor.name, "act")
                 if self._check_winner():
                     return None
                 report = self._scan_for_report()
@@ -294,6 +356,8 @@ class GameEngine:
         for p in self.players.values():
             if p.kill_cooldown > 0:
                 p.kill_cooldown -= 1
+            if p.sabotage_cooldown > 0:
+                p.sabotage_cooldown -= 1
 
     # -- meeting & voting ------------------------------------------------------
 
@@ -342,6 +406,7 @@ class GameEngine:
                     voter.model, correct=bool(target and target.role == Role.IMPOSTOR)
                 )
             await self._emit(EventType.VOTE, f"{name} voted for {valid}", voter=name, choice=valid)
+            await self._emit_thought(name, "vote")
 
         ejected = self._resolve_vote(tally)
         if ejected:
@@ -401,6 +466,7 @@ class GameEngine:
         while self.round < self.config.max_rounds and winner is None:
             self.round += 1
             self.tick = 0
+            self.sabotage = None  # crew fix any sabotage between rounds
             self.phase = Phase.ACTION
             await self._emit(EventType.PHASE_CHANGE, f"Round {self.round}: action phase")
 

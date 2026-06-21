@@ -18,6 +18,9 @@ class Agent(abc.ABC):
         self.name = name
         self.role = role
         self.model = model  # the model spec, e.g. "openai:gpt-4o"
+        # Short private rationale for the most recent decision; the engine reads
+        # this after each call and streams it to spectators as a THOUGHT event.
+        self.last_reasoning: str = ""
 
     @abc.abstractmethod
     async def act_task(self, task: Task) -> str:
@@ -30,13 +33,22 @@ class Agent(abc.ABC):
         """Return a room from ``options`` or 'stay', aware of who is in the room."""
 
     @abc.abstractmethod
-    async def decide_kill(
-        self, targets: list[str], others_here: list[str], room: str, memory: list[str]
+    async def decide_impostor_action(
+        self,
+        room: str,
+        targets: list[str],
+        others_here: list[str],
+        vent_targets: list[str],
+        can_sabotage: bool,
+        memory: list[str],
     ) -> str:
-        """Impostor only: return a target name or 'pass'.
+        """Impostor's action token, one of:
 
-        ``others_here`` is everyone sharing the room besides the impostor; killing
-        leaves all of them except the victim as witnesses.
+        * ``"kill <name>"``      — eliminate a co-located crewmate (witnesses expose you)
+        * ``"vent <room>"``      — relocate to a neighbour secretly (caught if seen)
+        * ``"sabotage lights"``  — blind crewmates for the rest of the round
+        * ``"sabotage comms"``   — block body reports / meetings for the rest of the round
+        * ``"pass"``             — fake a task to blend in
         """
 
     @abc.abstractmethod

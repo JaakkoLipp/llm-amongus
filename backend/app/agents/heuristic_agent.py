@@ -42,13 +42,33 @@ class HeuristicAgent(Agent):
         # Spread out across the ship (so isolated encounters — and kills — happen);
         # occasionally stay put to do another task.
         if self.rng.random() < 0.8 and options:
-            return self.rng.choice(options)
+            dest = self.rng.choice(options)
+            self.last_reasoning = (
+                f"Heading to {dest} to find a target alone."
+                if self.role == Role.IMPOSTOR
+                else f"Moving to {dest} to spread out and do tasks."
+            )
+            return dest
+        self.last_reasoning = "Staying put."
         return "stay"
 
-    async def decide_kill(self, targets, others_here, room, memory) -> str:
-        # Kill only in a true 1-on-1 (no other witnesses left behind).
+    async def decide_impostor_action(
+        self, room, targets, others_here, vent_targets, can_sabotage, memory
+    ) -> str:
+        # Kill in a true 1-on-1 (no witnesses left behind).
         if targets and len(others_here) == 1:
-            return targets[0]
+            self.last_reasoning = f"Alone with {targets[0]} — safe to strike, no witnesses."
+            return f"kill {targets[0]}"
+        # Witnesses around: occasionally slip away through a vent.
+        if others_here and vent_targets and self.rng.random() < 0.4:
+            dest = self.rng.choice(vent_targets)
+            self.last_reasoning = f"Too crowded — venting to {dest} to escape unseen."
+            return f"vent {dest}"
+        # Sometimes cut the lights for cover.
+        if can_sabotage and self.rng.random() < 0.25:
+            self.last_reasoning = "Cutting the lights to blind the crew."
+            return "sabotage lights"
+        self.last_reasoning = "Nothing clean here; I'll fake a task."
         return "pass"
 
     async def discuss(self, memory, transcript, alive) -> str:
@@ -75,10 +95,12 @@ class HeuristicAgent(Agent):
         # 1) Caught red-handed beats everything.
         killer = self._witnessed_killer(memory)
         if killer and killer in alive:
+            self.last_reasoning = f"I personally saw {killer} kill someone. Voting {killer}."
             return killer
         # 2) Trust a credible accusation in the discussion.
         m = re.search(r"It's (\w+), vote them out", transcript or "")
         if m and m.group(1) in alive and m.group(1) != self.name:
+            self.last_reasoning = f"{m.group(1)} was called out by a witness; I'll back that."
             return m.group(1)
         # 3) Deduce — imperfectly: sometimes suspect someone seen near the death
         #    room. The noise keeps offline games from being a crewmate sweep
@@ -86,10 +108,14 @@ class HeuristicAgent(Agent):
         if self.rng.random() < 0.45:
             suspect = self._suspect_from_scene(memory, alive)
             if suspect:
+                self.last_reasoning = f"I saw {suspect} near where the body was found."
                 return suspect
         others = [p for p in alive if p != self.name]
         if others and self.rng.random() < 0.3:
-            return self.rng.choice(others)
+            pick = self.rng.choice(others)
+            self.last_reasoning = f"No hard evidence; {pick} feels off."
+            return pick
+        self.last_reasoning = "I have no real evidence, so I'll skip."
         return "skip"
 
     def _suspect_from_scene(self, memory: list[str], alive: list[str]) -> str | None:
