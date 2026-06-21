@@ -106,6 +106,44 @@ async def test_vent_relocates_secretly():
 
 
 @pytest.mark.asyncio
+async def test_emergency_meeting_fires_on_witnessed_kill():
+    engine = GameEngine(GameConfig(seed=1, default_model="heuristic"))
+    engine.setup()
+    engine.round, engine.tick = 1, 1
+    player = next(iter(engine.players.values()))
+    player.emergencies_left = 1
+    engine.memory[player.name] = ["R1.1: WITNESSED Blue kill Pink in Reactor!"]
+    called = await engine._maybe_emergency(player)
+    assert called and player.emergencies_left == 0
+
+
+@pytest.mark.asyncio
+async def test_reactor_fix_caps_at_required():
+    engine = GameEngine(GameConfig(seed=1, default_model="heuristic", critical_fix_required=2))
+    engine.setup()
+    engine.round, engine.tick = 1, 1
+    crew = next(p for p in engine.players.values() if p.role == Role.CREWMATE)
+    crew.location = "Reactor"
+    engine.critical = {"timer": 2, "fixes": 0, "required": 2}
+    for _ in range(3):
+        await engine._commit_fix(crew)
+    assert engine.critical["fixes"] == 2  # extra fixes ignored
+
+
+@pytest.mark.asyncio
+async def test_reactor_suppresses_body_reports_until_fixed():
+    engine = GameEngine(GameConfig(seed=1, default_model="heuristic"))
+    engine.setup()
+    engine.bodies = {"Pink": ("Reactor", "Blue")}
+    finder = next(p for p in engine.players.values() if p.name not in ("Blue", "Pink"))
+    finder.location, finder.alive = "Reactor", True
+    engine.critical = {"timer": 2, "fixes": 0, "required": 2}
+    assert engine._scan_for_report() is None
+    engine.critical = None
+    assert engine._scan_for_report() is not None
+
+
+@pytest.mark.asyncio
 async def test_comms_sabotage_blocks_reports():
     engine = GameEngine(GameConfig(seed=1, default_model="heuristic"))
     engine.setup()

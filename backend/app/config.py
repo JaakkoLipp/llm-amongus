@@ -114,6 +114,11 @@ class GameConfig:
     kill_cooldown: int = 1
     # Rounds an impostor must wait between sabotages.
     sabotage_cooldown: int = 2
+    # Emergency meetings each player may call (without a body) per game.
+    emergency_meetings_per_player: int = 1
+    # Reactor (critical) sabotage: rounds to fix, and crewmate fix-actions needed.
+    critical_timer: int = 2
+    critical_fix_required: int = 2
     # Seconds to pause between emitted events when streaming a game to spectators.
     # 0 in eval/headless mode; small positive value makes the web UI watchable.
     event_delay: float = float(os.environ.get("AMONGLLM_EVENT_DELAY", "0.0"))

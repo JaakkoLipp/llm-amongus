@@ -157,6 +157,10 @@ code { background: #0c1322; padding: 1px 5px; border-radius: 4px; font-size: 12p
 .taction { font-size: 10px; text-transform: uppercase; color: var(--muted); border: 1px solid var(--line); border-radius: 999px; padding: 0 6px; }
 .ttext { color: #cbb8f0; font-style: italic; }
 .pill.sabotage { background: #4a2a0d; border-color: #d08a1f; text-transform: capitalize; }
+.pill.reactor { background: #4a0d0d; border-color: #ff4d4d; animation: pulse 1s ease-in-out infinite; }
+@keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.55; } }
+.fline.emergency { background: #2a1f0d; }
+.fline.fix { background: #0d2a1a; }
 .tiny-btn { margin-left: auto; padding: 4px 10px; font-size: 12px; }
 
 .board { width: 100%; border-collapse: collapse; margin-top: 10px; }

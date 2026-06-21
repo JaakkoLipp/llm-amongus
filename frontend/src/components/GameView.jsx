@@ -115,6 +115,7 @@ const ICON = {
   task_result: "🧩", kill: "🔪", body_reported: "🚨", vote: "🗳️",
   ejection: "🚪", move: "🚶", chat: "💬", game_end: "🏁", meeting_start: "📣",
   phase_change: "⏱️", game_start: "🚀", vent: "🟪", sabotage: "⚠️",
+  emergency: "🔔", fix: "🔧", info: "ℹ️",
 };
 
 function EventFeed({ feed }) {
@@ -137,7 +138,7 @@ function EventFeed({ feed }) {
 }
 
 export default function GameView({ game }) {
-  const { map, players, chat, feed, thoughts, round, phase, winner, reason, sabotage } = game;
+  const { map, players, chat, feed, thoughts, round, phase, winner, reason, sabotage, critical } = game;
   const [showThoughts, setShowThoughts] = useState(true);
   return (
     <div className="gameview">
@@ -145,6 +146,11 @@ export default function GameView({ game }) {
         <span className="pill">Round {round}</span>
         <span className={`pill phase-${phase}`}>{phase}</span>
         {sabotage && <span className="pill sabotage">⚠️ {sabotage} sabotaged</span>}
+        {critical && (
+          <span className="pill reactor">
+            ☢️ REACTOR — fix {critical.fixes}/{critical.required} · {critical.timer} round(s) left
+          </span>
+        )}
         {winner && (
           <span className={`pill win ${winner}`}>
             {winner === "impostors" ? "🔴 Impostors win" : "🔵 Crewmates win"} — {reason}

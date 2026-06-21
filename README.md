@@ -42,6 +42,9 @@ deterministic checkers, so there is nothing to memorize.
   Engine, then Pink followed, then the body was found there." Impostors fake tasks
   to build alibis and must isolate targets — killing in front of a witness gets
   you caught. A body found mid-round ends the round and triggers a meeting.
+- **Emergency meetings** — any player who has seen something (a kill, a vent) can
+  spend their emergency to convene a meeting *without* a body, forcing everyone to
+  discuss and vote immediately. Limited per player.
 - **Impostor abilities:**
   - **Vent** — relocate to a neighbouring room *secretly* (no one sees you leave
     or arrive) — unless someone is in the room, who catches you venting (a strong
@@ -49,8 +52,12 @@ deterministic checkers, so there is nothing to memorize.
   - **Sabotage lights** — blind all crewmates for the rest of the round (they
     witness nothing); impostors still see. Cover for a kill or escape.
   - **Sabotage comms** — block body reports and meetings for the rest of the
-    round. Both sabotages are public-but-anonymous and have a cooldown; crew fix
-    them between rounds.
+    round. Lights/comms are public-but-anonymous, on a cooldown, and crew-fixed
+    between rounds.
+  - **Sabotage reactor (critical)** — a fix-or-lose meltdown: crewmates must drop
+    tasks and rush to a fix room (Reactor / Electrical) and complete enough fixes
+    within the timer, or the impostors win outright. Tasks pause and meetings are
+    blocked while it's active — perfect chaos for a kill.
 - **Live agent reasoning** — every LLM's short private rationale per decision is
   streamed to the spectator UI as a `thought` event (toggle "Show reasoning"),
   so you can watch a model deduce, lie, or pick a kill — without other players

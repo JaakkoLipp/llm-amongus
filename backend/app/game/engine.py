@@ -72,6 +72,7 @@ class GameEngine:
         self.bodies: dict[str, tuple[str, str]] = {}  # victim -> (room, killer)
         self.memory: dict[str, list[str]] = {}        # player -> personal log
         self.sabotage: str | None = None              # "lights" | "comms" | None (this round)
+        self.critical: dict | None = None             # active reactor meltdown, or None
         self.event_count = 0
 
     # -- helpers ---------------------------------------------------------------
@@ -130,6 +131,7 @@ class GameEngine:
             role = Role.IMPOSTOR if name in impostor_names else Role.CREWMATE
             spec = self.config.spec_for(name)
             player = Player(name=name, role=role, model=spec, location=game_map.START_ROOM)
+            player.emergencies_left = self.config.emergency_meetings_per_player
             if role == Role.CREWMATE:
                 tasks = bank.draw(self.config.tasks_per_crewmate)
                 self.tasks[name] = tasks
@@ -240,6 +242,9 @@ class GameEngine:
         return True
 
     async def _commit_sabotage(self, actor: Player, kind: str) -> None:
+        if "react" in kind:
+            await self._commit_critical(actor)
+            return
         kind = "comms" if "comm" in kind else "lights"
         self.sabotage = kind
         actor.sabotage_cooldown = self.config.sabotage_cooldown + 1
@@ -251,9 +256,39 @@ class GameEngine:
             kind=kind, by=actor.name,  # `by` is spectator-only metadata
         )
 
+    async def _commit_critical(self, actor: Player) -> None:
+        actor.sabotage_cooldown = self.config.sabotage_cooldown + 1
+        self.critical = {"timer": self.config.critical_timer, "fixes": 0,
+                         "required": self.config.critical_fix_required}
+        for p in self.alive():
+            self._remember(p.name, "the REACTOR was sabotaged — it must be fixed!")
+        await self._emit(
+            EventType.SABOTAGE,
+            f"REACTOR MELTDOWN! Fix it in {game_map.FIX_ROOMS} within "
+            f"{self.config.critical_timer} round(s) or impostors win.",
+            kind="reactor", by=actor.name, timer=self.config.critical_timer,
+            fix_rooms=game_map.FIX_ROOMS, fixes=0, required=self.config.critical_fix_required,
+        )
+
+    async def _commit_fix(self, actor: Player) -> None:
+        if not (self.critical and actor.location in game_map.FIX_ROOMS):
+            return
+        if self.critical["fixes"] >= self.critical["required"]:
+            return  # already fixed enough this round
+        self.critical["fixes"] += 1
+        self._remember(actor.name, f"fixed a reactor panel in {actor.location}")
+        await self._emit(
+            EventType.FIX,
+            f"{actor.name} fixed a reactor panel "
+            f"({self.critical['fixes']}/{self.critical['required']})",
+            player=actor.name, fixes=self.critical["fixes"], required=self.critical["required"],
+        )
+
     async def _decide_act(self, actor: Player):
         """Make (but don't apply) an actor's post-move action. Returns an intent."""
         if actor.role == Role.CREWMATE:
+            if self.critical:  # drop everything to fix the reactor
+                return ("fix",) if actor.location in game_map.FIX_ROOMS else ("idle",)
             if actor.tasks_completed >= actor.tasks_total:
                 return ("idle",)
             task = self.tasks[actor.name][actor.tasks_completed]
@@ -262,7 +297,9 @@ class GameEngine:
         others = self._occupants(actor.location, exclude=actor.name)
         killable = [] if actor.kill_cooldown > 0 else [o.name for o in others if o.role == Role.CREWMATE]
         vent_targets = game_map.neighbors(actor.location)
-        can_sabotage = self.sabotage is None and actor.sabotage_cooldown == 0
+        can_sabotage = (
+            self.sabotage is None and self.critical is None and actor.sabotage_cooldown == 0
+        )
         token = await self.agents[actor.name].decide_impostor_action(
             actor.location, killable, [o.name for o in others], vent_targets,
             can_sabotage, self.memory[actor.name],
@@ -273,6 +310,9 @@ class GameEngine:
         kind = decision[0]
         if kind == "task":
             await self._commit_task(actor, decision[1], decision[2])
+            return
+        if kind == "fix":
+            await self._commit_fix(actor)
             return
         if kind != "imp":
             return  # "idle": finished crewmate does nothing
@@ -290,8 +330,8 @@ class GameEngine:
 
     def _scan_for_report(self) -> tuple[str, str, str] | None:
         """A body is discovered when a living non-killer shares its room.
-        Sabotaged comms suppress reports until the round ends."""
-        if self.sabotage == "comms":
+        Sabotaged comms and an active reactor meltdown suppress reports."""
+        if self.sabotage == "comms" or self.critical:
             return None
         for victim, (room, killer) in list(self.bodies.items()):
             finders = [p for p in self.alive() if p.location == room and p.name != killer]
@@ -301,8 +341,34 @@ class GameEngine:
                 return reporter.name, victim, room
         return None
 
-    async def _run_action_phase(self) -> tuple[str, str, str] | None:
-        """One round of ticks. Returns a body report the moment one occurs."""
+    def _move_alert(self, actor: Player) -> dict | None:
+        """Reactor guidance for an actor's move decision, or None."""
+        if not self.critical:
+            return None
+        return {
+            "kind": "reactor",
+            "fix_rooms": game_map.FIX_ROOMS,
+            "timer": self.critical["timer"],
+            "step": game_map.step_toward(actor.location, game_map.FIX_ROOMS),
+        }
+
+    async def _maybe_emergency(self, actor: Player) -> bool:
+        """Let a player with evidence call an emergency meeting (no body needed)."""
+        if actor.emergencies_left <= 0 or self.critical or self.sabotage == "comms":
+            return False
+        mem = self.memory[actor.name]
+        witnessed = any("WITNESSED" in m for m in mem)
+        saw_vent = any("use a vent" in m for m in mem)
+        if not (witnessed or saw_vent):
+            return False
+        reason = "you witnessed a murder" if witnessed else "you saw someone vent"
+        if await self.agents[actor.name].decide_emergency(mem, self.alive_names(), reason):
+            actor.emergencies_left -= 1
+            return True
+        return False
+
+    async def _run_action_phase(self) -> dict | None:
+        """One round of ticks. Returns a meeting trigger the moment one occurs."""
         remaining = self.alive()
         self.rng.shuffle(remaining)
 
@@ -320,6 +386,12 @@ class GameEngine:
             remaining = waiting
             self.tick += 1
 
+            # EMERGENCY: a player with evidence can convene a meeting immediately.
+            for actor in chosen:
+                if await self._maybe_emergency(actor):
+                    await self._emit_thought(actor.name, "emergency")
+                    return {"type": "emergency", "caller": actor.name}
+
             # MOVE: decide concurrently (overlapping LLM calls), apply in order.
             for a in chosen:
                 self.agents[a.name].last_reasoning = ""
@@ -327,7 +399,7 @@ class GameEngine:
                 self.agents[a.name].decide_move(
                     a.location, game_map.neighbors(a.location),
                     [o.name for o in self._occupants(a.location, exclude=a.name)],
-                    self.memory[a.name],
+                    self.memory[a.name], self._move_alert(a),
                 )
                 for a in chosen
             ))
@@ -349,7 +421,8 @@ class GameEngine:
                     return None
                 report = self._scan_for_report()
                 if report:
-                    return report
+                    return {"type": "body", "reporter": report[0],
+                            "victim": report[1], "room": report[2]}
         return None
 
     def _decrement_cooldowns(self) -> None:
@@ -361,16 +434,26 @@ class GameEngine:
 
     # -- meeting & voting ------------------------------------------------------
 
-    async def _run_meeting(self, reporter: str, victim: str, room: str) -> None:
+    async def _run_meeting(self, trigger: dict) -> None:
         self.phase = Phase.MEETING
-        for p in self.alive():
-            self._remember(p.name, f"meeting called: {victim} found dead in {room} (reported by {reporter})")
-        self.bodies.clear()
-        await self._emit(
-            EventType.BODY_REPORTED, f"{reporter} reported {victim}'s body in {room}",
-            reporter=reporter, victim=victim, room=room,
-        )
-        await self._emit(EventType.MEETING_START, "Emergency meeting started")
+        if trigger["type"] == "body":
+            reporter, victim, room = trigger["reporter"], trigger["victim"], trigger["room"]
+            for p in self.alive():
+                self._remember(p.name, f"meeting: {victim} found dead in {room} (reported by {reporter})")
+            await self._emit(
+                EventType.BODY_REPORTED, f"{reporter} reported {victim}'s body in {room}",
+                reporter=reporter, victim=victim, room=room,
+            )
+        else:  # emergency
+            caller = trigger["caller"]
+            for p in self.alive():
+                self._remember(p.name, f"meeting: emergency meeting called by {caller}")
+            await self._emit(
+                EventType.EMERGENCY, f"{caller} called an emergency meeting",
+                caller=caller,
+            )
+        self.bodies.clear()  # any meeting clears outstanding bodies
+        await self._emit(EventType.MEETING_START, "Meeting in session")
 
         transcript: list[str] = []
         for _ in range(self.config.discussion_rounds):
@@ -470,14 +553,29 @@ class GameEngine:
             self.phase = Phase.ACTION
             await self._emit(EventType.PHASE_CHANGE, f"Round {self.round}: action phase")
 
-            report = await self._run_action_phase()
+            trigger = await self._run_action_phase()
             self._decrement_cooldowns()
+
+            # Resolve an active reactor meltdown: fixed -> cleared; else the timer
+            # ticks down and a meltdown that runs out is an impostor win.
+            if self.critical:
+                if self.critical["fixes"] >= self.critical["required"]:
+                    self.critical = None
+                    await self._emit(
+                        EventType.INFO, "Reactor stabilized — crew fixed it in time.",
+                        reactor="stabilized",
+                    )
+                else:
+                    self.critical["timer"] -= 1
+                    if self.critical["timer"] <= 0:
+                        winner = ("impostors", "reactor meltdown — crew failed to fix it")
+                        break
 
             winner = self._check_winner()
             if winner:
                 break
-            if report:
-                await self._run_meeting(*report)
+            if trigger:
+                await self._run_meeting(trigger)
                 winner = self._check_winner()
 
         if winner is None:

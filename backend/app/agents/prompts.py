@@ -61,15 +61,40 @@ def task_prompt(task_prompt_text: str) -> str:
     )
 
 
-def move_prompt(current: str, options: list[str], present: list[str], memory: list[str]) -> str:
+def move_prompt(
+    current: str, options: list[str], present: list[str], memory: list[str],
+    alert: dict | None = None,
+) -> str:
     who = ", ".join(present) if present else "no one else"
+    alert_text = ""
+    if alert and alert.get("kind") == "reactor":
+        step = alert.get("step")
+        rooms = ", ".join(alert.get("fix_rooms", []))
+        toward = f" From here, head toward {step}." if step else " You are at a fix point — stay and fix it!"
+        alert_text = (
+            f"\n🚨 REACTOR MELTDOWN — the crew must reach {rooms} and fix it within "
+            f"{alert.get('timer')} round(s) or everyone loses.{toward}\n"
+        )
     return (
         f"You are in {current} with: {who}.\n"
-        f"Adjacent rooms you can move to: {', '.join(options)}.\n\n"
+        f"Adjacent rooms you can move to: {', '.join(options)}.\n"
+        f"{alert_text}\n"
         f"What you've noticed so far:\n{_memory_block(memory, 25)}\n\n"
         "Decide where to go — to reach tasks, stay safe near others, or "
         "investigate. Reply with one room name, or 'stay'.\n"
         "Put it on a line as `ANSWER: <room or stay>`."
+    )
+
+
+def emergency_prompt(reason: str, memory: list[str], alive: list[str]) -> str:
+    return (
+        "You can call an EMERGENCY MEETING right now (you have one to spend) to "
+        "force everyone to gather, discuss, and vote — no body required.\n"
+        f"Why this might be worth it: {reason}\n\n"
+        f"What you've seen:\n{_memory_block(memory, 25)}\n\n"
+        f"Players alive: {', '.join(alive)}\n\n"
+        "Call the meeting only if you have evidence worth acting on now. "
+        "Answer yes or no on a line as `ANSWER: <yes or no>`."
     )
 
 
@@ -95,7 +120,9 @@ def impostor_action_prompt(
     sab = (
         "\n- 'sabotage lights' — blind all crewmates for the rest of this round "
         "(great cover for a kill or escape).\n- 'sabotage comms' — block body "
-        "reports and meetings for the rest of this round."
+        "reports and meetings for the rest of this round.\n- 'sabotage reactor' — "
+        "trigger a meltdown: the crew must drop everything and rush to fix it or "
+        "you WIN. Causes chaos and stops tasks."
         if can_sabotage else ""
     )
     return (

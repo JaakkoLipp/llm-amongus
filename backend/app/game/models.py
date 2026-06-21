@@ -46,6 +46,7 @@ class Player:
     tasks_total: int = 0
     kill_cooldown: int = 0
     sabotage_cooldown: int = 0
+    emergencies_left: int = 0
     ejected: bool = False
 
     def public_view(self) -> dict[str, Any]:
@@ -76,6 +77,8 @@ class EventType(str, Enum):
     THOUGHT = "thought"      # an agent's private reasoning (spectator-only)
     VENT = "vent"            # impostor secret relocation
     SABOTAGE = "sabotage"    # impostor sabotage triggered
+    EMERGENCY = "emergency"  # a player called an emergency meeting
+    FIX = "fix"              # a crewmate fixed a reactor panel
 
 
 @dataclass

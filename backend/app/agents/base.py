@@ -28,9 +28,20 @@ class Agent(abc.ABC):
 
     @abc.abstractmethod
     async def decide_move(
-        self, current: str, options: list[str], present: list[str], memory: list[str]
+        self, current: str, options: list[str], present: list[str], memory: list[str],
+        alert: dict | None = None,
     ) -> str:
-        """Return a room from ``options`` or 'stay', aware of who is in the room."""
+        """Return a room from ``options`` or 'stay', aware of who is in the room.
+
+        ``alert`` (when set) describes an active reactor sabotage and the next
+        hop toward a fix room, so players can race to fix it.
+        """
+
+    @abc.abstractmethod
+    async def decide_emergency(
+        self, memory: list[str], alive: list[str], reason: str
+    ) -> bool:
+        """Return True to call an emergency meeting now (you have evidence)."""
 
     @abc.abstractmethod
     async def decide_impostor_action(

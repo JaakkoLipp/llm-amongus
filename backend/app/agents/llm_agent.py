@@ -24,7 +24,12 @@ def _parse_action(reply: str, targets: list[str], vent_targets: list[str], can_s
     """Normalize an impostor's free-form choice into an action token."""
     ans = extract_answer(reply).lower()
     if can_sabotage and "sabotage" in ans:
-        kind = "comms" if "comm" in ans else "lights"
+        if "reactor" in ans or "meltdown" in ans:
+            kind = "reactor"
+        elif "comm" in ans:
+            kind = "comms"
+        else:
+            kind = "lights"
         return f"sabotage {kind}"
     if "vent" in ans:
         for r in vent_targets:
@@ -65,12 +70,21 @@ class LLMAgent(Agent):
     async def act_task(self, task: Task) -> str:
         return await self._ask(prompts.task_prompt(task.prompt), max_tokens=700)
 
-    async def decide_move(self, current, options, present, memory) -> str:
+    async def decide_move(self, current, options, present, memory, alert=None) -> str:
         reply = await self._ask(
-            prompts.move_prompt(current, options, present, memory), max_tokens=140
+            prompts.move_prompt(current, options, present, memory, alert), max_tokens=140
         )
         self.last_reasoning = _reasoning(reply)
         return _match_choice(reply, options, default="stay")
+
+    async def decide_emergency(self, memory, alive, reason) -> bool:
+        reply = await self._ask(
+            prompts.emergency_prompt(reason, memory, alive), max_tokens=120
+        )
+        ans = extract_answer(reply).lower()
+        called = ans.startswith("y")
+        self.last_reasoning = _reasoning(reply) if called else ""
+        return called
 
     async def decide_impostor_action(
         self, room, targets, others_here, vent_targets, can_sabotage, memory

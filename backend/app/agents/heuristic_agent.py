@@ -38,7 +38,16 @@ class HeuristicAgent(Agent):
             return f"ANSWER: {task.expected}"
         return f"ANSWER: {self.rng.choice(_WRONG)}"
 
-    async def decide_move(self, current, options, present, memory) -> str:
+    async def decide_move(self, current, options, present, memory, alert=None) -> str:
+        # Reactor meltdown: crewmates rush to a fix room.
+        if alert and alert.get("kind") == "reactor" and self.role == Role.CREWMATE:
+            step = alert.get("step")
+            if step and step in options:
+                self.last_reasoning = f"Reactor meltdown — rushing toward {step} to fix it."
+                return step
+            if step is None:  # already at a fix room
+                self.last_reasoning = "At the reactor — staying to fix it."
+                return "stay"
         # Spread out across the ship (so isolated encounters — and kills — happen);
         # occasionally stay put to do another task.
         if self.rng.random() < 0.8 and options:
@@ -52,6 +61,16 @@ class HeuristicAgent(Agent):
         self.last_reasoning = "Staying put."
         return "stay"
 
+    async def decide_emergency(self, memory, alive, reason) -> bool:
+        # Call a meeting when you actually saw a kill; sometimes after a vent.
+        if self._witnessed_killer(memory):
+            self.last_reasoning = "I witnessed a murder — calling an emergency meeting now."
+            return True
+        if any("use a vent" in m for m in memory) and self.rng.random() < 0.5:
+            self.last_reasoning = "I saw someone vent — worth calling a meeting."
+            return True
+        return False
+
     async def decide_impostor_action(
         self, room, targets, others_here, vent_targets, can_sabotage, memory
     ) -> str:
@@ -64,8 +83,12 @@ class HeuristicAgent(Agent):
             dest = self.rng.choice(vent_targets)
             self.last_reasoning = f"Too crowded — venting to {dest} to escape unseen."
             return f"vent {dest}"
-        # Sometimes cut the lights for cover.
+        # Sometimes sabotage: usually lights for cover, occasionally a reactor
+        # meltdown to force chaos / a possible sabotage win.
         if can_sabotage and self.rng.random() < 0.25:
+            if self.rng.random() < 0.4:
+                self.last_reasoning = "Triggering a reactor meltdown to pressure the crew."
+                return "sabotage reactor"
             self.last_reasoning = "Cutting the lights to blind the crew."
             return "sabotage lights"
         self.last_reasoning = "Nothing clean here; I'll fake a task."

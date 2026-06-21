@@ -8,7 +8,8 @@ import {
 
 const EMPTY_GAME = {
   map: {}, players: {}, chat: [], feed: [], thoughts: [],
-  round: 0, phase: "lobby", winner: null, reason: "", reveal: null, sabotage: null,
+  round: 0, phase: "lobby", winner: null, reason: "", reveal: null,
+  sabotage: null, critical: null,
 };
 
 const DEFAULT_CONFIG = {
@@ -68,17 +69,29 @@ export default function App() {
           return next;
         }
         case "phase_change": {
-          next.sabotage = null; // sabotage is fixed between rounds
+          next.sabotage = null; // lights/comms are fixed between rounds
+          break;                // reactor (critical) persists until resolved
+        }
+        case "sabotage": {
+          if (d.kind === "reactor") {
+            next.critical = { fixes: 0, required: d.required, timer: d.timer };
+          } else {
+            next.sabotage = d.kind;
+          }
+          break;
+        }
+        case "fix": {
+          if (next.critical) next.critical = { ...next.critical, fixes: d.fixes };
+          break;
+        }
+        case "info": {
+          if (d.reactor === "stabilized") next.critical = null;
           break;
         }
         case "move":
         case "vent": {
           const p = next.players[d.player];
           if (p) next.players = { ...next.players, [d.player]: { ...p, location: d.to } };
-          break;
-        }
-        case "sabotage": {
-          next.sabotage = d.kind;
           break;
         }
         case "thought": {
