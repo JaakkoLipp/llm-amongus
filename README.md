@@ -150,6 +150,15 @@ provider behind an `LLMClient.chat()` interface — Claude uses the Anthropic SD
 while OpenAI / OpenRouter / Ollama share one OpenAI-compatible client (they speak
 the same wire protocol; only `base_url` and key differ).
 
+**Round processing & concurrency.** A round runs in *ticks*. Each tick picks at
+most one player per room and overlaps their LLM calls (`asyncio.gather`), then
+applies effects in a deterministic order. Players sharing a room are sequenced
+across successive ticks, so within-round ordering — "Green left, then Pink
+followed, then the body was found" — is preserved, while players in different
+rooms (who can't observe each other mid-turn) run in parallel. Speedup scales
+with how dispersed the ship is; when everyone is in one room it degrades to fully
+sequential, which is what correctness there requires.
+
 ---
 
 ## API

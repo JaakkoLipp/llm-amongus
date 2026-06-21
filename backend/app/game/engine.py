@@ -120,22 +120,25 @@ class GameEngine:
             self.agents[name] = make_agent(name, role, spec, rng=self.rng)
             self.memory[name] = []
 
-    # -- per-actor turn steps (sequential, ordered) ----------------------------
+    # -- per-actor turn steps --------------------------------------------------
+    #
+    # A round is processed in *ticks*. Each tick selects at most one player per
+    # room (so two players sharing a room are sequenced across successive ticks,
+    # preserving "follow-the-victim" ordering), then runs those players' turns
+    # with overlapping LLM calls: decisions are gathered concurrently, effects are
+    # applied in a deterministic order. Players in different rooms can't observe
+    # each other mid-turn, so this is safe — and the parallelism grows as the ship
+    # disperses. When everyone is crammed in one room it degrades to fully
+    # sequential, which is exactly what correctness there requires.
 
-    async def _actor_move(self, actor: Player) -> None:
+    async def _apply_move(self, actor: Player, choice: str) -> None:
         opts = game_map.neighbors(actor.location)
-        present = [p.name for p in self._occupants(actor.location, exclude=actor.name)]
-        choice = await self.agents[actor.name].decide_move(
-            actor.location, opts, present, self.memory[actor.name]
-        )
         if not choice or choice == "stay" or choice not in opts:
             return
         origin = actor.location
-        # Players left behind in the origin witness the departure (in order).
         for q in self._occupants(origin, exclude=actor.name):
             self._remember(q.name, f"saw {actor.name} leave {origin} toward {choice}")
         actor.location = choice
-        # Players already in the destination witness the arrival.
         for q in self._occupants(choice, exclude=actor.name):
             self._remember(q.name, f"saw {actor.name} arrive in {choice}")
         here = [p.name for p in self._occupants(choice, exclude=actor.name)]
@@ -145,11 +148,9 @@ class GameEngine:
             player=actor.name, **{"from": origin, "to": choice},
         )
 
-    async def _actor_task(self, actor: Player) -> None:
-        if actor.tasks_completed >= actor.tasks_total:
+    async def _commit_task(self, actor: Player, task: Task, raw: str) -> None:
+        if not actor.alive:  # killed earlier in this same tick
             return
-        task = self.tasks[actor.name][actor.tasks_completed]
-        raw = await self.agents[actor.name].act_task(task)
         att = TaskAttempt(
             player=actor.name, category=task.category, difficulty=task.difficulty,
             prompt=task.prompt, expected=task.expected, answer=extract_answer(raw),
@@ -170,23 +171,17 @@ class GameEngine:
             tasks_completed=actor.tasks_completed, tasks_total=actor.tasks_total,
         )
 
-    async def _actor_fake_task(self, actor: Player) -> None:
+    async def _fake_task(self, actor: Player) -> None:
         """Impostor pretends to do a task — looks identical to observers."""
+        if not actor.alive:
+            return
         self._remember(actor.name, f"pretended to do a task in {actor.location}")
         for q in self._occupants(actor.location, exclude=actor.name):
             self._remember(q.name, f"saw {actor.name} doing a task in {actor.location}")
 
-    async def _actor_kill(self, actor: Player) -> bool:
+    async def _commit_kill(self, actor: Player, choice: str) -> bool:
         if actor.kill_cooldown > 0:
             return False
-        others = self._occupants(actor.location, exclude=actor.name)
-        targets = [p for p in others if p.role == Role.CREWMATE]
-        if not targets:
-            return False
-        choice = await self.agents[actor.name].decide_kill(
-            [t.name for t in targets], [o.name for o in others], actor.location,
-            self.memory[actor.name],
-        )
         victim = self.players.get(choice)
         if not (victim and victim.alive and victim.role == Role.CREWMATE
                 and victim.location == actor.location):
@@ -211,6 +206,35 @@ class GameEngine:
         )
         return True
 
+    async def _decide_act(self, actor: Player):
+        """Make (but don't apply) an actor's post-move action. Returns an intent."""
+        if actor.role == Role.CREWMATE:
+            if actor.tasks_completed >= actor.tasks_total:
+                return ("idle",)
+            task = self.tasks[actor.name][actor.tasks_completed]
+            raw = await self.agents[actor.name].act_task(task)
+            return ("task", task, raw)
+        others = self._occupants(actor.location, exclude=actor.name)
+        targets = [o for o in others if o.role == Role.CREWMATE]
+        if actor.kill_cooldown > 0 or not targets:
+            return ("fake",)
+        choice = await self.agents[actor.name].decide_kill(
+            [t.name for t in targets], [o.name for o in others], actor.location,
+            self.memory[actor.name],
+        )
+        return ("kill", choice)
+
+    async def _apply_act(self, actor: Player, decision: tuple) -> None:
+        kind = decision[0]
+        if kind == "task":
+            await self._commit_task(actor, decision[1], decision[2])
+        elif kind == "kill":
+            if not await self._commit_kill(actor, decision[1]):
+                await self._fake_task(actor)  # kill fell through; just look busy
+        elif kind == "fake":
+            await self._fake_task(actor)
+        # "idle": finished crewmate does nothing this turn
+
     def _scan_for_report(self) -> tuple[str, str, str] | None:
         """A body is discovered when a living non-killer shares its room."""
         for victim, (room, killer) in list(self.bodies.items()):
@@ -222,24 +246,48 @@ class GameEngine:
         return None
 
     async def _run_action_phase(self) -> tuple[str, str, str] | None:
-        """One round of sequential turns. Returns a body report if one occurs."""
-        order = self.alive()
-        self.rng.shuffle(order)
-        for actor in order:
-            if not actor.alive:  # could have been killed earlier this round
-                continue
-            self.tick += 1
-            await self._actor_move(actor)
-            if actor.role == Role.CREWMATE:
-                await self._actor_task(actor)
-            elif not await self._actor_kill(actor):
-                await self._actor_fake_task(actor)
+        """One round of ticks. Returns a body report the moment one occurs."""
+        remaining = self.alive()
+        self.rng.shuffle(remaining)
 
-            if self._check_winner():        # e.g. last task done, or parity reached
-                return None
-            report = self._scan_for_report()
-            if report:                      # body found -> end the round now
-                return report
+        while remaining:
+            # At most one actor per room this tick; the rest wait for a later tick.
+            chosen: list[Player] = []
+            waiting: list[Player] = []
+            rooms_taken: set[str] = set()
+            for p in remaining:
+                if p.alive and p.location not in rooms_taken:
+                    chosen.append(p)
+                    rooms_taken.add(p.location)
+                elif p.alive:
+                    waiting.append(p)
+            remaining = waiting
+            self.tick += 1
+
+            # MOVE: decide concurrently (overlapping LLM calls), apply in order.
+            move_choices = await asyncio.gather(*(
+                self.agents[a.name].decide_move(
+                    a.location, game_map.neighbors(a.location),
+                    [o.name for o in self._occupants(a.location, exclude=a.name)],
+                    self.memory[a.name],
+                )
+                for a in chosen
+            ))
+            for actor, choice in zip(chosen, move_choices):
+                await self._apply_move(actor, choice)
+
+            # ACT: decide concurrently (post-move), apply in order with re-validation.
+            actors = [a for a in chosen if a.alive]
+            decisions = await asyncio.gather(*(self._decide_act(a) for a in actors))
+            for actor, decision in zip(actors, decisions):
+                if not actor.alive:
+                    continue
+                await self._apply_act(actor, decision)
+                if self._check_winner():
+                    return None
+                report = self._scan_for_report()
+                if report:
+                    return report
         return None
 
     def _decrement_cooldowns(self) -> None:
