@@ -12,6 +12,7 @@ from fastapi.staticfiles import StaticFiles
 from .config import DEFAULT_MODEL, GameConfig, PROVIDERS, available_providers
 from .eval.metrics import Evaluator
 from .game.engine import PLAYER_NAMES, GameEngine
+from .game.models import EventType
 
 app = FastAPI(title="Among LLMs", version="0.1.0")
 
@@ -118,8 +119,13 @@ async def ws_game(ws: WebSocket) -> None:
     if cfg.event_delay == 0.0:
         cfg.event_delay = 0.4
 
+    # Push a live eval snapshot whenever the numbers that feed it change.
+    _eval_triggers = {EventType.TASK_RESULT, EventType.EJECTION, EventType.GAME_END}
+
     async def emit(event) -> None:
         await ws.send_json(event.to_dict())
+        if event.type in _eval_triggers:
+            await ws.send_json({"type": "eval", "data": EVALUATOR.leaderboard()})
 
     engine = GameEngine(cfg, emit=emit, evaluator=EVALUATOR)
     try:

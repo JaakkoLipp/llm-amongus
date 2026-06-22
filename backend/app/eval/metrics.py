@@ -71,6 +71,14 @@ class ModelStats:
             vote_precision=round(self.vote_precision, 3),
             deception_rate=round(self.deception_rate, 3),
             capability_score=self.capability_score,
+            crew_win_rate=round(self.wins_as_crewmate / self.games_as_crewmate, 3)
+            if self.games_as_crewmate else 0.0,
+            impostor_win_rate=round(self.deception_rate, 3),
+            survival_rate=round(self.survived / self.games, 3) if self.games else 0.0,
+            category_accuracy={
+                cat: round(c / t, 3) if t else 0.0
+                for cat, (c, t) in self.task_by_category.items()
+            },
         )
         return d
 

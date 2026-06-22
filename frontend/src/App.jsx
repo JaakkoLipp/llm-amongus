@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import GameSetup from "./components/GameSetup.jsx";
 import GameView from "./components/GameView.jsx";
-import Leaderboard from "./components/Leaderboard.jsx";
+import EvalDashboard from "./components/EvalDashboard.jsx";
 import {
   getProviders, getLeaderboard, resetLeaderboard, simulate, openGameSocket,
 } from "./api.js";
@@ -155,8 +155,8 @@ export default function App() {
     wsRef.current = ws;
     ws.onmessage = (e) => {
       const msg = JSON.parse(e.data);
-      if (msg.type === "leaderboard") {
-        setBoard(msg.data || []);
+      if (msg.type === "eval" || msg.type === "leaderboard") {
+        setBoard(msg.data || []); // live eval snapshot during the game
         return;
       }
       if (msg.type === "error") {
@@ -205,7 +205,7 @@ export default function App() {
             className={tab === "leaderboard" ? "active" : ""}
             onClick={() => { setTab("leaderboard"); refreshBoard(); }}
           >
-            Leaderboard
+            Eval dashboard
           </button>
         </nav>
         <span className="tagline">social-deduction eval for agentic LLMs</span>
@@ -227,7 +227,9 @@ export default function App() {
         </div>
       )}
 
-      {tab === "leaderboard" && <Leaderboard rows={board} onReset={doReset} />}
+      {tab === "leaderboard" && (
+        <EvalDashboard rows={board} onReset={doReset} live={running} />
+      )}
 
       <footer className="foot">
         Mix Claude · OpenAI · OpenRouter · Ollama players. Capability tasks +

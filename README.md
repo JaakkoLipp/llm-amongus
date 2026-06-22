@@ -29,6 +29,13 @@ Results aggregate **by model spec**, producing a single `capability_score`
 (0–100) plus the breakdown. Tasks are generated fresh every game with their own
 deterministic checkers, so there is nothing to memorize.
 
+The **Eval dashboard** updates **live** as a game runs — the server streams an
+eval snapshot over the WebSocket whenever a task is attempted, a vote resolves,
+or a game ends. It shows headline cards, a per-model table (score, task accuracy,
+overall/crew/impostor win rates, vote precision, survival), and per-capability
+task-accuracy bars (arithmetic, sequence, deduction, unscramble, code-trace,
+cipher).
+
 ---
 
 ## Game rules (short version)
@@ -186,7 +193,7 @@ sequential, which is what correctness there requires.
 | Method | Path | Purpose |
 |--------|------|---------|
 | `GET`  | `/api/providers` | configured providers, sample specs, player names |
-| `GET`  | `/api/leaderboard` | current per-model leaderboard |
+| `GET`  | `/api/leaderboard` | current per-model leaderboard (full eval breakdown) |
 | `POST` | `/api/leaderboard/reset` | clear accumulated stats |
 | `POST` | `/api/simulate` | run N headless games, return results + board |
 | `WS`   | `/ws/game` | send a config, stream a live game's events |

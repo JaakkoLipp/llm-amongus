@@ -163,6 +163,21 @@ code { background: #0c1322; padding: 1px 5px; border-radius: 4px; font-size: 12p
 .fline.fix { background: #0d2a1a; }
 .tiny-btn { margin-left: auto; padding: 4px 10px; font-size: 12px; }
 
+/* Eval dashboard */
+.live-dot { color: #2bd47e; font-size: 13px; margin-left: 8px; animation: pulse 1.2s ease-in-out infinite; }
+.cards { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin: 14px 0; }
+.card { background: #0c1322; border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; }
+.card-n { font-size: 22px; font-weight: 800; }
+.card-l { color: var(--muted); font-size: 12px; margin-top: 2px; }
+.cat-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; margin-top: 8px; }
+.cat-card { background: #0c1322; border: 1px solid var(--line); border-radius: 10px; padding: 12px; }
+.cat-model { margin-bottom: 8px; color: var(--accent); }
+.cat-row { display: flex; align-items: center; gap: 8px; margin: 4px 0; }
+.cat-name { width: 86px; font-size: 12px; color: var(--muted); }
+.ebar { position: relative; flex: 1; background: #060b16; border-radius: 5px; height: 16px; overflow: hidden; }
+.ebar-fill { background: linear-gradient(90deg, #2a6df0, #2bd47e); height: 100%; }
+.ebar-label { position: absolute; right: 6px; top: 0; font-size: 10px; line-height: 16px; }
+
 .board { width: 100%; border-collapse: collapse; margin-top: 10px; }
 .board th, .board td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); font-size: 14px; }
 .board th { color: var(--muted); font-weight: 600; }
