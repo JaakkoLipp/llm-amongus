@@ -163,6 +163,23 @@ code { background: #0c1322; padding: 1px 5px; border-radius: 4px; font-size: 12p
 .fline.fix { background: #0d2a1a; }
 .tiny-btn { margin-left: auto; padding: 4px 10px; font-size: 12px; }
 
+/* Live capability strip (docked under the game) */
+.cap-strip {
+  display: flex; align-items: center; gap: 10px; margin-bottom: 12px;
+  background: var(--panel-solid); border: 1px solid var(--line);
+  border-radius: 10px; padding: 8px 12px;
+}
+.cap-title { font-size: 11px; text-transform: uppercase; color: var(--muted); white-space: nowrap; font-weight: 700; }
+.cap-chips { display: flex; gap: 8px; overflow-x: auto; }
+.cap-chip {
+  display: flex; flex-direction: column; min-width: 150px;
+  background: #0c1322; border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px;
+}
+.cap-chip.lead { border-color: var(--accent); background: #12233a; }
+.cap-model { font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 160px; }
+.cap-score { font-size: 20px; font-weight: 800; line-height: 1.1; }
+.cap-sub { font-size: 10px; color: var(--muted); white-space: nowrap; }
+
 /* Eval dashboard */
 .live-dot { color: #2bd47e; font-size: 13px; margin-left: 8px; animation: pulse 1.2s ease-in-out infinite; }
 .cards { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin: 14px 0; }

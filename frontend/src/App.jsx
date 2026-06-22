@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from "react";
 import GameSetup from "./components/GameSetup.jsx";
 import GameView from "./components/GameView.jsx";
 import EvalDashboard from "./components/EvalDashboard.jsx";
+import CapabilityStrip from "./components/CapabilityStrip.jsx";
 import {
   getProviders, getLeaderboard, resetLeaderboard, simulate, openGameSocket,
 } from "./api.js";
@@ -223,7 +224,12 @@ export default function App() {
             onSimulate={runSimulation}
             running={running}
           />
-          {(game.round > 0 || running) && <GameView game={game} />}
+          {(game.round > 0 || running) && (
+            <>
+              <CapabilityStrip rows={board} />
+              <GameView game={game} />
+            </>
+          )}
         </div>
       )}
 
