@@ -29,14 +29,46 @@ Results aggregate **by model spec**, producing a single `capability_score`
 (0–100) plus the breakdown. Tasks are generated fresh every game with their own
 deterministic checkers, so there is nothing to memorize.
 
+The **Eval dashboard** updates **live** as a game runs — the server streams an
+eval snapshot over the WebSocket whenever a task is attempted, a vote resolves,
+or a game ends. It shows headline cards, a per-model table (score, task accuracy,
+overall/crew/impostor win rates, vote precision, survival), and per-capability
+task-accuracy bars (arithmetic, sequence, deduction, unscramble, code-trace,
+cipher).
+
 ---
 
 ## Game rules (short version)
 
 - N players; some are **Impostors**, the rest **Crewmates**.
-- **Action phase** each round: crewmates attempt their current task (a capability
-  test); everyone moves between connected rooms; impostors may kill a co-located
-  crewmate (with a cooldown). Movement is public, giving crewmates alibi data.
+- **Action phase** each round: players take turns in a shuffled order — each
+  moves, then does/fakes a task or (as impostor) kills, vents, or sabotages.
+  Perception is **partial-observability with sequential timing**: a player only
+  knows what it personally witnesses, recorded in true chronological order
+  (tagged `R<round>.<tick>`), so memory captures reads like "Green left for Upper
+  Engine, then Pink followed, then the body was found there." Impostors fake tasks
+  to build alibis and must isolate targets — killing in front of a witness gets
+  you caught. A body found mid-round ends the round and triggers a meeting.
+- **Emergency meetings** — any player who has seen something (a kill, a vent) can
+  spend their emergency to convene a meeting *without* a body, forcing everyone to
+  discuss and vote immediately. Limited per player.
+- **Impostor abilities:**
+  - **Vent** — relocate to a neighbouring room *secretly* (no one sees you leave
+    or arrive) — unless someone is in the room, who catches you venting (a strong
+    tell). Great for escaping after an isolated kill.
+  - **Sabotage lights** — blind all crewmates for the rest of the round (they
+    witness nothing); impostors still see. Cover for a kill or escape.
+  - **Sabotage comms** — block body reports and meetings for the rest of the
+    round. Lights/comms are public-but-anonymous, on a cooldown, and crew-fixed
+    between rounds.
+  - **Sabotage reactor (critical)** — a fix-or-lose meltdown: crewmates must drop
+    tasks and rush to a fix room (Reactor / Electrical) and complete enough fixes
+    within the timer, or the impostors win outright. Tasks pause and meetings are
+    blocked while it's active — perfect chaos for a kill.
+- **Live agent reasoning** — every LLM's short private rationale per decision is
+  streamed to the spectator UI as a `thought` event (toggle "Show reasoning"),
+  so you can watch a model deduce, lie, or pick a kill — without other players
+  seeing it.
 - When a living player shares a room with a body, an **emergency meeting** starts:
   agents discuss for a few turns, then **vote** to eject someone (or skip; ties
   and skip-pluralities eject no one).
@@ -145,6 +177,15 @@ provider behind an `LLMClient.chat()` interface — Claude uses the Anthropic SD
 while OpenAI / OpenRouter / Ollama share one OpenAI-compatible client (they speak
 the same wire protocol; only `base_url` and key differ).
 
+**Round processing & concurrency.** A round runs in *ticks*. Each tick picks at
+most one player per room and overlaps their LLM calls (`asyncio.gather`), then
+applies effects in a deterministic order. Players sharing a room are sequenced
+across successive ticks, so within-round ordering — "Green left, then Pink
+followed, then the body was found" — is preserved, while players in different
+rooms (who can't observe each other mid-turn) run in parallel. Speedup scales
+with how dispersed the ship is; when everyone is in one room it degrades to fully
+sequential, which is what correctness there requires.
+
 ---
 
 ## API
@@ -152,7 +193,7 @@ the same wire protocol; only `base_url` and key differ).
 | Method | Path | Purpose |
 |--------|------|---------|
 | `GET`  | `/api/providers` | configured providers, sample specs, player names |
-| `GET`  | `/api/leaderboard` | current per-model leaderboard |
+| `GET`  | `/api/leaderboard` | current per-model leaderboard (full eval breakdown) |
 | `POST` | `/api/leaderboard/reset` | clear accumulated stats |
 | `POST` | `/api/simulate` | run N headless games, return results + board |
 | `WS`   | `/ws/game` | send a config, stream a live game's events |

@@ -1,14 +1,16 @@
 import React, { useEffect, useRef, useState } from "react";
 import GameSetup from "./components/GameSetup.jsx";
 import GameView from "./components/GameView.jsx";
-import Leaderboard from "./components/Leaderboard.jsx";
+import EvalDashboard from "./components/EvalDashboard.jsx";
+import CapabilityStrip from "./components/CapabilityStrip.jsx";
 import {
   getProviders, getLeaderboard, resetLeaderboard, simulate, openGameSocket,
 } from "./api.js";
 
 const EMPTY_GAME = {
-  map: {}, players: {}, chat: [], feed: [],
+  map: {}, players: {}, chat: [], feed: [], thoughts: [],
   round: 0, phase: "lobby", winner: null, reason: "", reveal: null,
+  sabotage: null, critical: null,
 };
 
 const DEFAULT_CONFIG = {
@@ -67,9 +69,37 @@ export default function App() {
           next.reveal = null;
           return next;
         }
-        case "move": {
+        case "phase_change": {
+          next.sabotage = null; // lights/comms are fixed between rounds
+          break;                // reactor (critical) persists until resolved
+        }
+        case "sabotage": {
+          if (d.kind === "reactor") {
+            next.critical = { fixes: 0, required: d.required, timer: d.timer };
+          } else {
+            next.sabotage = d.kind;
+          }
+          break;
+        }
+        case "fix": {
+          if (next.critical) next.critical = { ...next.critical, fixes: d.fixes };
+          break;
+        }
+        case "info": {
+          if (d.reactor === "stabilized") next.critical = null;
+          break;
+        }
+        case "move":
+        case "vent": {
           const p = next.players[d.player];
           if (p) next.players = { ...next.players, [d.player]: { ...p, location: d.to } };
+          break;
+        }
+        case "thought": {
+          next.thoughts = [
+            ...g.thoughts,
+            { actor: d.actor, action: d.action, text: d.text },
+          ].slice(-80);
           break;
         }
         case "task_result": {
@@ -110,8 +140,8 @@ export default function App() {
         default:
           break;
       }
-      // Append to feed (skip moves to keep it readable; they show on the map).
-      if (ev.type !== "move") {
+      // Append to feed (skip moves + thoughts; those have their own surfaces).
+      if (ev.type !== "move" && ev.type !== "thought") {
         next.feed = [...g.feed, { type: ev.type, message: ev.message }].slice(-200);
       }
       return next;
@@ -126,8 +156,8 @@ export default function App() {
     wsRef.current = ws;
     ws.onmessage = (e) => {
       const msg = JSON.parse(e.data);
-      if (msg.type === "leaderboard") {
-        setBoard(msg.data || []);
+      if (msg.type === "eval" || msg.type === "leaderboard") {
+        setBoard(msg.data || []); // live eval snapshot during the game
         return;
       }
       if (msg.type === "error") {
@@ -176,7 +206,7 @@ export default function App() {
             className={tab === "leaderboard" ? "active" : ""}
             onClick={() => { setTab("leaderboard"); refreshBoard(); }}
           >
-            Leaderboard
+            Eval dashboard
           </button>
         </nav>
         <span className="tagline">social-deduction eval for agentic LLMs</span>
@@ -194,11 +224,18 @@ export default function App() {
             onSimulate={runSimulation}
             running={running}
           />
-          {(game.round > 0 || running) && <GameView game={game} />}
+          {(game.round > 0 || running) && (
+            <>
+              <CapabilityStrip rows={board} />
+              <GameView game={game} />
+            </>
+          )}
         </div>
       )}
 
-      {tab === "leaderboard" && <Leaderboard rows={board} onReset={doReset} />}
+      {tab === "leaderboard" && (
+        <EvalDashboard rows={board} onReset={doReset} live={running} />
+      )}
 
       <footer className="foot">
         Mix Claude · OpenAI · OpenRouter · Ollama players. Capability tasks +

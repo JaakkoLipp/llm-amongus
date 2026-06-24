@@ -3,12 +3,17 @@
 Design notes
 ------------
 * Every observable happening is a :class:`GameEvent` pushed through an async
-  ``emit`` callback. The WebSocket layer streams them to spectators; the headless
-  eval runner ignores them. The engine itself never touches I/O beyond ``emit``.
-* Movement is fully public (a shared observation log) so crewmates have alibi
-  data to reason over — this keeps the deduction tractable for v1.
-* Agent calls within a phase are issued concurrently with ``asyncio.gather`` so a
-  table of slow remote models doesn't serialize into very long rounds.
+  ``emit`` callback. The WebSocket layer streams them to spectators (who are
+  omniscient); the headless eval runner ignores them.
+* Players have *partial observability with sequential timing*. The action phase
+  is processed one player at a time in a shuffled turn order: each acts (moves,
+  then does/fakes a task or kills), and everyone co-present records what they
+  witness **in real chronological order**, tagged ``R<round>.<tick>``. So a
+  crewmate's memory can show "Pink entered Electrical, then Green followed, then
+  I saw the body" — the ordering that makes alibis and follow-the-victim reads
+  possible.
+* A body discovered mid-round ends the action phase immediately and calls a
+  meeting (as in Among Us). Agents reason over their own memory, never a global log.
 """
 from __future__ import annotations
 
@@ -22,14 +27,7 @@ from ..agents import Agent, make_agent
 from ..config import GameConfig
 from ..eval.metrics import Evaluator
 from . import map as game_map
-from .models import (
-    EventType,
-    GameEvent,
-    Phase,
-    Player,
-    Role,
-    TaskAttempt,
-)
+from .models import EventType, GameEvent, Phase, Player, Role, TaskAttempt
 from .tasks import Task, TaskBank, extract_answer
 
 PLAYER_NAMES = [
@@ -66,12 +64,15 @@ class GameEngine:
         self.evaluator = evaluator or Evaluator()
         self.rng = random.Random(self.config.seed)
         self.round = 0
+        self.tick = 0  # monotonic order index within a round
         self.phase = Phase.LOBBY
         self.players: dict[str, Player] = {}
         self.agents: dict[str, Agent] = {}
         self.tasks: dict[str, list[Task]] = {}
-        self.bodies: dict[str, str] = {}  # victim name -> room, awaiting report
-        self.round_obs: list[str] = []
+        self.bodies: dict[str, tuple[str, str]] = {}  # victim -> (room, killer)
+        self.memory: dict[str, list[str]] = {}        # player -> personal log
+        self.sabotage: str | None = None              # "lights" | "comms" | None (this round)
+        self.critical: dict | None = None             # active reactor meltdown, or None
         self.event_count = 0
 
     # -- helpers ---------------------------------------------------------------
@@ -83,6 +84,26 @@ class GameEngine:
         )
         if self.config.event_delay:
             await asyncio.sleep(self.config.event_delay)
+
+    def _remember(self, player: str, text: str) -> None:
+        self.memory.setdefault(player, []).append(f"R{self.round}.{self.tick}: {text}")
+
+    def _observe(self, observer: Player, text: str) -> None:
+        """Record something a player *witnesses*. Under a 'lights' sabotage,
+        crewmates are blind and record nothing they see (impostors still can)."""
+        if self.sabotage == "lights" and observer.role == Role.CREWMATE:
+            return
+        self._remember(observer.name, text)
+
+    async def _emit_thought(self, name: str, action: str) -> None:
+        """Stream an agent's private rationale to spectators (omniscient view)."""
+        reasoning = (getattr(self.agents[name], "last_reasoning", "") or "").strip()
+        if not reasoning:
+            return
+        await self._emit(
+            EventType.THOUGHT, f"{name} (thinking): {reasoning}",
+            actor=name, action=action, text=reasoning, private=True,
+        )
 
     def alive(self) -> list[Player]:
         return [p for p in self.players.values() if p.alive]
@@ -96,8 +117,8 @@ class GameEngine:
     def crew_alive(self) -> list[Player]:
         return [p for p in self.alive() if p.role == Role.CREWMATE]
 
-    def obs_text(self) -> str:
-        return "\n".join(self.round_obs) if self.round_obs else "(quiet round, nothing notable)"
+    def _occupants(self, room: str, exclude: str | None = None) -> list[Player]:
+        return [p for p in self.alive() if p.location == room and p.name != exclude]
 
     # -- setup -----------------------------------------------------------------
 
@@ -109,136 +130,340 @@ class GameEngine:
         for name in names:
             role = Role.IMPOSTOR if name in impostor_names else Role.CREWMATE
             spec = self.config.spec_for(name)
-            player = Player(
-                name=name, role=role, model=spec, location=game_map.START_ROOM
-            )
+            player = Player(name=name, role=role, model=spec, location=game_map.START_ROOM)
+            player.emergencies_left = self.config.emergency_meetings_per_player
             if role == Role.CREWMATE:
                 tasks = bank.draw(self.config.tasks_per_crewmate)
                 self.tasks[name] = tasks
                 player.tasks_total = len(tasks)
             self.players[name] = player
             self.agents[name] = make_agent(name, role, spec, rng=self.rng)
+            self.memory[name] = []
 
-    # -- phases ----------------------------------------------------------------
+    # -- per-actor turn steps --------------------------------------------------
+    #
+    # A round is processed in *ticks*. Each tick selects at most one player per
+    # room (so two players sharing a room are sequenced across successive ticks,
+    # preserving "follow-the-victim" ordering), then runs those players' turns
+    # with overlapping LLM calls: decisions are gathered concurrently, effects are
+    # applied in a deterministic order. Players in different rooms can't observe
+    # each other mid-turn, so this is safe — and the parallelism grows as the ship
+    # disperses. When everyone is crammed in one room it degrades to fully
+    # sequential, which is exactly what correctness there requires.
 
-    async def _run_tasks(self) -> None:
-        crew = [p for p in self.crew_alive() if p.tasks_completed < p.tasks_total]
-        if not crew:
+    async def _apply_move(self, actor: Player, choice: str) -> None:
+        opts = game_map.neighbors(actor.location)
+        if not choice or choice == "stay" or choice not in opts:
             return
+        origin = actor.location
+        for q in self._occupants(origin, exclude=actor.name):
+            self._observe(q, f"saw {actor.name} leave {origin} toward {choice}")
+        actor.location = choice
+        for q in self._occupants(choice, exclude=actor.name):
+            self._observe(q, f"saw {actor.name} arrive in {choice}")
+        here = [p.name for p in self._occupants(choice, exclude=actor.name)]
+        self._remember(actor.name, f"moved {origin}->{choice}; here now: {', '.join(here) or 'no one'}")
+        await self._emit(
+            EventType.MOVE, f"{actor.name} moved to {choice}",
+            player=actor.name, **{"from": origin, "to": choice},
+        )
 
-        async def attempt(p: Player) -> tuple[Player, TaskAttempt]:
-            task = self.tasks[p.name][p.tasks_completed]
-            raw = await self.agents[p.name].act_task(task)
-            correct = task.check(raw)
-            att = TaskAttempt(
-                player=p.name,
-                category=task.category,
-                difficulty=task.difficulty,
-                prompt=task.prompt,
-                expected=task.expected,
-                answer=extract_answer(raw),
-                correct=correct,
-                round=self.round,
-            )
-            return p, att
+    async def _commit_task(self, actor: Player, task: Task, raw: str) -> None:
+        if not actor.alive:  # killed earlier in this same tick
+            return
+        att = TaskAttempt(
+            player=actor.name, category=task.category, difficulty=task.difficulty,
+            prompt=task.prompt, expected=task.expected, answer=extract_answer(raw),
+            correct=task.check(raw), round=self.round,
+        )
+        self.evaluator.record_task(actor.model, att)
+        if att.correct:
+            actor.tasks_completed += 1
+        self._remember(actor.name, f"did a real task in {actor.location}")
+        for q in self._occupants(actor.location, exclude=actor.name):
+            self._observe(q, f"saw {actor.name} doing a task in {actor.location}")
+        await self._emit(
+            EventType.TASK_RESULT,
+            f"{actor.name} {'completed' if att.correct else 'failed'} a "
+            f"{att.category} task ({att.answer!r})",
+            player=actor.name, category=att.category, difficulty=att.difficulty,
+            correct=att.correct, answer=att.answer, expected=att.expected,
+            tasks_completed=actor.tasks_completed, tasks_total=actor.tasks_total,
+        )
 
-        for p, att in await asyncio.gather(*(attempt(p) for p in crew)):
-            self.evaluator.record_task(p.model, att)
-            if att.correct:
-                p.tasks_completed += 1
-            await self._emit(
-                EventType.TASK_RESULT,
-                f"{p.name} {'completed' if att.correct else 'failed'} a "
-                f"{att.category} task ({att.answer!r})",
-                player=p.name,
-                category=att.category,
-                difficulty=att.difficulty,
-                correct=att.correct,
-                answer=att.answer,
-                expected=att.expected,
-                tasks_completed=p.tasks_completed,
-                tasks_total=p.tasks_total,
-            )
+    async def _fake_task(self, actor: Player) -> None:
+        """Impostor pretends to do a task — looks identical to observers."""
+        if not actor.alive:
+            return
+        self._remember(actor.name, f"pretended to do a task in {actor.location}")
+        for q in self._occupants(actor.location, exclude=actor.name):
+            self._observe(q, f"saw {actor.name} doing a task in {actor.location}")
 
-    async def _run_moves(self) -> None:
-        movers = self.alive()
+    async def _commit_kill(self, actor: Player, choice: str) -> bool:
+        if actor.kill_cooldown > 0:
+            return False
+        victim = self.players.get(choice)
+        if not (victim and victim.alive and victim.role == Role.CREWMATE
+                and victim.location == actor.location):
+            return False
+        victim.alive = False
+        actor.kill_cooldown = self.config.kill_cooldown + 1
+        self.bodies[victim.name] = (actor.location, actor.name)
+        self.evaluator.record_kill(actor.model)
+        witnesses = [p for p in self._occupants(actor.location) if p.name != actor.name]
+        for w in witnesses:
+            self._observe(w, f"WITNESSED {actor.name} kill {victim.name} in {actor.location}!")
+        self._remember(
+            actor.name,
+            f"killed {victim.name} in {actor.location} "
+            f"(witnesses: {', '.join(w.name for w in witnesses) or 'none'})",
+        )
+        await self._emit(
+            EventType.KILL,
+            f"{victim.name} was eliminated in {actor.location}"
+            + (f" (witnessed by {', '.join(w.name for w in witnesses)})" if witnesses else ""),
+            victim=victim.name, room=actor.location, witnesses=[w.name for w in witnesses],
+        )
+        return True
 
-        async def pick(p: Player) -> tuple[Player, str]:
-            opts = game_map.neighbors(p.location)
-            choice = await self.agents[p.name].decide_move(p.location, opts)
-            return p, choice
+    async def _commit_vent(self, actor: Player, dest: str) -> bool:
+        if dest not in game_map.neighbors(actor.location):
+            return False
+        origin = actor.location
+        # Anyone in the origin catches the vent (a strong tell) — unless blinded.
+        for w in self._occupants(origin, exclude=actor.name):
+            self._observe(w, f"saw {actor.name} use a vent in {origin}!")
+        actor.location = dest  # silent arrival: no destination observations
+        self._remember(actor.name, f"vented {origin}->{dest}")
+        await self._emit(
+            EventType.VENT, f"{actor.name} vented to {dest}",
+            player=actor.name, private=True, **{"from": origin, "to": dest},
+        )
+        return True
 
-        for p, choice in await asyncio.gather(*(pick(p) for p in movers)):
-            if choice and choice != "stay" and choice in game_map.neighbors(p.location):
-                old = p.location
-                p.location = choice
-                self.round_obs.append(f"{p.name} moved from {old} to {choice}.")
-                await self._emit(
-                    EventType.MOVE, f"{p.name} moved to {choice}",
-                    player=p.name, **{"from": old, "to": choice},
+    async def _commit_sabotage(self, actor: Player, kind: str) -> None:
+        if "react" in kind:
+            await self._commit_critical(actor)
+            return
+        kind = "comms" if "comm" in kind else "lights"
+        self.sabotage = kind
+        actor.sabotage_cooldown = self.config.sabotage_cooldown + 1
+        # Sabotage is public but anonymous — everyone notices, no one sees who.
+        for p in self.alive():
+            self._remember(p.name, f"the {kind} were sabotaged (by someone unknown)")
+        await self._emit(
+            EventType.SABOTAGE, f"The {kind} were sabotaged!",
+            kind=kind, by=actor.name,  # `by` is spectator-only metadata
+        )
+
+    async def _commit_critical(self, actor: Player) -> None:
+        actor.sabotage_cooldown = self.config.sabotage_cooldown + 1
+        self.critical = {"timer": self.config.critical_timer, "fixes": 0,
+                         "required": self.config.critical_fix_required}
+        for p in self.alive():
+            self._remember(p.name, "the REACTOR was sabotaged — it must be fixed!")
+        await self._emit(
+            EventType.SABOTAGE,
+            f"REACTOR MELTDOWN! Fix it in {game_map.FIX_ROOMS} within "
+            f"{self.config.critical_timer} round(s) or impostors win.",
+            kind="reactor", by=actor.name, timer=self.config.critical_timer,
+            fix_rooms=game_map.FIX_ROOMS, fixes=0, required=self.config.critical_fix_required,
+        )
+
+    async def _commit_fix(self, actor: Player) -> None:
+        if not (self.critical and actor.location in game_map.FIX_ROOMS):
+            return
+        if self.critical["fixes"] >= self.critical["required"]:
+            return  # already fixed enough this round
+        self.critical["fixes"] += 1
+        self._remember(actor.name, f"fixed a reactor panel in {actor.location}")
+        await self._emit(
+            EventType.FIX,
+            f"{actor.name} fixed a reactor panel "
+            f"({self.critical['fixes']}/{self.critical['required']})",
+            player=actor.name, fixes=self.critical["fixes"], required=self.critical["required"],
+        )
+
+    async def _decide_act(self, actor: Player):
+        """Make (but don't apply) an actor's post-move action. Returns an intent."""
+        if actor.role == Role.CREWMATE:
+            if self.critical:  # drop everything to fix the reactor
+                return ("fix",) if actor.location in game_map.FIX_ROOMS else ("idle",)
+            if actor.tasks_completed >= actor.tasks_total:
+                return ("idle",)
+            task = self.tasks[actor.name][actor.tasks_completed]
+            raw = await self.agents[actor.name].act_task(task)
+            return ("task", task, raw)
+        others = self._occupants(actor.location, exclude=actor.name)
+        killable = [] if actor.kill_cooldown > 0 else [o.name for o in others if o.role == Role.CREWMATE]
+        vent_targets = game_map.neighbors(actor.location)
+        can_sabotage = (
+            self.sabotage is None and self.critical is None and actor.sabotage_cooldown == 0
+        )
+        token = await self.agents[actor.name].decide_impostor_action(
+            actor.location, killable, [o.name for o in others], vent_targets,
+            can_sabotage, self.memory[actor.name],
+        )
+        return ("imp", token)
+
+    async def _apply_act(self, actor: Player, decision: tuple) -> None:
+        kind = decision[0]
+        if kind == "task":
+            await self._commit_task(actor, decision[1], decision[2])
+            return
+        if kind == "fix":
+            await self._commit_fix(actor)
+            return
+        if kind != "imp":
+            return  # "idle": finished crewmate does nothing
+        verb, _, arg = decision[1].partition(" ")
+        if verb == "kill":
+            if not await self._commit_kill(actor, arg.strip()):
+                await self._fake_task(actor)
+        elif verb == "vent":
+            if not await self._commit_vent(actor, arg.strip()):
+                await self._fake_task(actor)
+        elif verb == "sabotage":
+            await self._commit_sabotage(actor, arg.strip())
+        else:
+            await self._fake_task(actor)
+
+    def _scan_for_report(self) -> tuple[str, str, str] | None:
+        """A body is discovered when a living non-killer shares its room.
+        Sabotaged comms and an active reactor meltdown suppress reports."""
+        if self.sabotage == "comms" or self.critical:
+            return None
+        for victim, (room, killer) in list(self.bodies.items()):
+            finders = [p for p in self.alive() if p.location == room and p.name != killer]
+            if finders:
+                reporter = self.rng.choice(finders)
+                self._remember(reporter.name, f"found {victim}'s body in {room}")
+                return reporter.name, victim, room
+        return None
+
+    def _move_alert(self, actor: Player) -> dict | None:
+        """Reactor guidance for an actor's move decision, or None."""
+        if not self.critical:
+            return None
+        return {
+            "kind": "reactor",
+            "fix_rooms": game_map.FIX_ROOMS,
+            "timer": self.critical["timer"],
+            "step": game_map.step_toward(actor.location, game_map.FIX_ROOMS),
+        }
+
+    async def _maybe_emergency(self, actor: Player) -> bool:
+        """Let a player with evidence call an emergency meeting (no body needed)."""
+        if actor.emergencies_left <= 0 or self.critical or self.sabotage == "comms":
+            return False
+        mem = self.memory[actor.name]
+        witnessed = any("WITNESSED" in m for m in mem)
+        saw_vent = any("use a vent" in m for m in mem)
+        if not (witnessed or saw_vent):
+            return False
+        reason = "you witnessed a murder" if witnessed else "you saw someone vent"
+        if await self.agents[actor.name].decide_emergency(mem, self.alive_names(), reason):
+            actor.emergencies_left -= 1
+            return True
+        return False
+
+    async def _run_action_phase(self) -> dict | None:
+        """One round of ticks. Returns a meeting trigger the moment one occurs."""
+        remaining = self.alive()
+        self.rng.shuffle(remaining)
+
+        while remaining:
+            # At most one actor per room this tick; the rest wait for a later tick.
+            chosen: list[Player] = []
+            waiting: list[Player] = []
+            rooms_taken: set[str] = set()
+            for p in remaining:
+                if p.alive and p.location not in rooms_taken:
+                    chosen.append(p)
+                    rooms_taken.add(p.location)
+                elif p.alive:
+                    waiting.append(p)
+            remaining = waiting
+            self.tick += 1
+
+            # EMERGENCY: a player with evidence can convene a meeting immediately.
+            for actor in chosen:
+                if await self._maybe_emergency(actor):
+                    await self._emit_thought(actor.name, "emergency")
+                    return {"type": "emergency", "caller": actor.name}
+
+            # MOVE: decide concurrently (overlapping LLM calls), apply in order.
+            for a in chosen:
+                self.agents[a.name].last_reasoning = ""
+            move_choices = await asyncio.gather(*(
+                self.agents[a.name].decide_move(
+                    a.location, game_map.neighbors(a.location),
+                    [o.name for o in self._occupants(a.location, exclude=a.name)],
+                    self.memory[a.name], self._move_alert(a),
                 )
+                for a in chosen
+            ))
+            for actor, choice in zip(chosen, move_choices):
+                await self._apply_move(actor, choice)
+                await self._emit_thought(actor.name, "move")
 
-    async def _run_kills(self) -> None:
-        for imp in self.impostors_alive():
-            if imp.kill_cooldown > 0:
-                continue
-            here = [
-                p for p in self.alive()
-                if p.location == imp.location and p.role == Role.CREWMATE
-            ]
-            if not here:
-                continue
-            target_name = await self.agents[imp.name].decide_kill(
-                [p.name for p in here], imp.location
-            )
-            victim = self.players.get(target_name)
-            if victim and victim.alive and victim.role == Role.CREWMATE and victim.location == imp.location:
-                victim.alive = False
-                imp.kill_cooldown = self.config.kill_cooldown + 1
-                self.bodies[victim.name] = victim.location
-                self.evaluator.record_kill(imp.model)
-                await self._emit(
-                    EventType.KILL,
-                    f"{victim.name} was eliminated in {victim.location}",
-                    victim=victim.name, room=victim.location,
-                )
+            # ACT: decide concurrently (post-move), apply in order with re-validation.
+            actors = [a for a in chosen if a.alive]
+            for a in actors:
+                self.agents[a.name].last_reasoning = ""
+            decisions = await asyncio.gather(*(self._decide_act(a) for a in actors))
+            for actor, decision in zip(actors, decisions):
+                if not actor.alive:
+                    continue
+                await self._apply_act(actor, decision)
+                await self._emit_thought(actor.name, "act")
+                if self._check_winner():
+                    return None
+                report = self._scan_for_report()
+                if report:
+                    return {"type": "body", "reporter": report[0],
+                            "victim": report[1], "room": report[2]}
+        return None
 
     def _decrement_cooldowns(self) -> None:
         for p in self.players.values():
             if p.kill_cooldown > 0:
                 p.kill_cooldown -= 1
+            if p.sabotage_cooldown > 0:
+                p.sabotage_cooldown -= 1
 
-    def _find_body_report(self) -> tuple[str, str, str] | None:
-        """Return (reporter, victim, room) if a living player shares a body's room."""
-        for victim, room in list(self.bodies.items()):
-            witnesses = [p for p in self.alive() if p.location == room]
-            if witnesses:
-                reporter = self.rng.choice(witnesses)
-                return reporter.name, victim, room
-        return None
+    # -- meeting & voting ------------------------------------------------------
 
-    async def _run_meeting(self, reporter: str, victim: str, room: str) -> None:
+    async def _run_meeting(self, trigger: dict) -> None:
         self.phase = Phase.MEETING
-        self.round_obs.append(f"{reporter} reported {victim}'s body in {room}.")
-        await self._emit(
-            EventType.BODY_REPORTED,
-            f"{reporter} reported {victim}'s body in {room}",
-            reporter=reporter, victim=victim, room=room,
-        )
-        self.bodies.clear()
-        await self._emit(EventType.MEETING_START, "Emergency meeting started")
+        if trigger["type"] == "body":
+            reporter, victim, room = trigger["reporter"], trigger["victim"], trigger["room"]
+            for p in self.alive():
+                self._remember(p.name, f"meeting: {victim} found dead in {room} (reported by {reporter})")
+            await self._emit(
+                EventType.BODY_REPORTED, f"{reporter} reported {victim}'s body in {room}",
+                reporter=reporter, victim=victim, room=room,
+            )
+        else:  # emergency
+            caller = trigger["caller"]
+            for p in self.alive():
+                self._remember(p.name, f"meeting: emergency meeting called by {caller}")
+            await self._emit(
+                EventType.EMERGENCY, f"{caller} called an emergency meeting",
+                caller=caller,
+            )
+        self.bodies.clear()  # any meeting clears outstanding bodies
+        await self._emit(EventType.MEETING_START, "Meeting in session")
 
         transcript: list[str] = []
-        alive = self.alive_names()
         for _ in range(self.config.discussion_rounds):
-            for name in alive:
-                if not self.players[name].alive:
-                    continue
+            for name in self.alive_names():
                 msg = await self.agents[name].discuss(
-                    self.obs_text(), "\n".join(transcript), self.alive_names()
+                    self.memory[name], "\n".join(transcript), self.alive_names()
                 )
                 line = f"{name}: {msg}"
                 transcript.append(line)
+                self._remember(name, f"said in meeting: {msg}")
                 await self._emit(EventType.CHAT, line, speaker=name, text=msg)
 
         await self._run_vote(transcript)
@@ -250,7 +475,7 @@ class GameEngine:
 
         async def cast(name: str) -> tuple[str, str]:
             choice = await self.agents[name].vote(
-                self.obs_text(), "\n".join(transcript), alive
+                self.memory[name], "\n".join(transcript), alive
             )
             return name, choice
 
@@ -264,13 +489,15 @@ class GameEngine:
                     voter.model, correct=bool(target and target.role == Role.IMPOSTOR)
                 )
             await self._emit(EventType.VOTE, f"{name} voted for {valid}", voter=name, choice=valid)
+            await self._emit_thought(name, "vote")
 
-        # Resolve: strict plurality, ties or skip-plurality => no ejection.
         ejected = self._resolve_vote(tally)
         if ejected:
             p = self.players[ejected]
             p.alive = False
             p.ejected = True
+            for q in self.alive():
+                self._remember(q.name, f"{ejected} was ejected (was a {p.role.value})")
             await self._emit(
                 EventType.EJECTION,
                 f"{ejected} was ejected. They were a {p.role.value}.",
@@ -288,16 +515,14 @@ class GameEngine:
         top, count = tally.most_common(1)[0]
         if top == "skip":
             return None
-        # Tie among non-skip candidates -> no ejection.
         contenders = [c for c, n in tally.items() if n == count and c != "skip"]
-        if len(contenders) != 1:
-            return None
-        return contenders[0]
+        return contenders[0] if len(contenders) == 1 else None
 
     # -- win conditions --------------------------------------------------------
 
     def _check_winner(self) -> tuple[str, str] | None:
-        if all(p.tasks_completed >= p.tasks_total for p in self.players.values() if p.role == Role.CREWMATE):
+        if all(p.tasks_completed >= p.tasks_total
+               for p in self.players.values() if p.role == Role.CREWMATE):
             return "crewmates", "all tasks completed"
         imp = self.impostors_alive()
         crew = self.crew_alive()
@@ -316,35 +541,41 @@ class GameEngine:
             EventType.GAME_START,
             f"Game started with {self.config.num_players} players, "
             f"{self.config.num_impostors} impostor(s)",
-            players=[
-                {"name": p.name, "model": p.model} for p in self.players.values()
-            ],
+            players=[{"name": p.name, "model": p.model} for p in self.players.values()],
             map=game_map.ROOMS,
         )
 
         winner: tuple[str, str] | None = None
         while self.round < self.config.max_rounds and winner is None:
             self.round += 1
+            self.tick = 0
+            self.sabotage = None  # crew fix any sabotage between rounds
             self.phase = Phase.ACTION
-            self.round_obs = []
             await self._emit(EventType.PHASE_CHANGE, f"Round {self.round}: action phase")
 
-            await self._run_tasks()
-            winner = self._check_winner()
-            if winner:
-                break
-
-            await self._run_moves()
-            await self._run_kills()
+            trigger = await self._run_action_phase()
             self._decrement_cooldowns()
 
+            # Resolve an active reactor meltdown: fixed -> cleared; else the timer
+            # ticks down and a meltdown that runs out is an impostor win.
+            if self.critical:
+                if self.critical["fixes"] >= self.critical["required"]:
+                    self.critical = None
+                    await self._emit(
+                        EventType.INFO, "Reactor stabilized — crew fixed it in time.",
+                        reactor="stabilized",
+                    )
+                else:
+                    self.critical["timer"] -= 1
+                    if self.critical["timer"] <= 0:
+                        winner = ("impostors", "reactor meltdown — crew failed to fix it")
+                        break
+
             winner = self._check_winner()
             if winner:
                 break
-
-            report = self._find_body_report()
-            if report:
-                await self._run_meeting(*report)
+            if trigger:
+                await self._run_meeting(trigger)
                 winner = self._check_winner()
 
         if winner is None:
@@ -375,19 +606,12 @@ class GameEngine:
 
     def _build_result(self, winner: tuple[str, str]) -> GameResult:
         return GameResult(
-            winner=winner[0],
-            reason=winner[1],
-            rounds=self.round,
-            events=self.event_count,
+            winner=winner[0], reason=winner[1], rounds=self.round, events=self.event_count,
             players=[
                 {
-                    "name": p.name,
-                    "role": p.role.value,
-                    "model": p.model,
-                    "alive": p.alive,
-                    "ejected": p.ejected,
-                    "tasks_completed": p.tasks_completed,
-                    "tasks_total": p.tasks_total,
+                    "name": p.name, "role": p.role.value, "model": p.model,
+                    "alive": p.alive, "ejected": p.ejected,
+                    "tasks_completed": p.tasks_completed, "tasks_total": p.tasks_total,
                 }
                 for p in self.players.values()
             ],

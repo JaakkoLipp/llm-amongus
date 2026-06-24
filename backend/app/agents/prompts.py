@@ -1,20 +1,29 @@
 """Prompt construction for LLM players.
 
-These prompts are intentionally the *only* place game rules are explained to a
-model, so every provider (Claude, OpenAI, OpenRouter, Ollama) plays by the same
-brief and the comparison stays fair.
+These prompts are intentionally the *only* place game rules and a player's
+situational awareness are described to a model, so every provider (Claude,
+OpenAI, OpenRouter, Ollama) plays from the same brief and the comparison stays
+fair.
+
+Awareness is partial-observability: each agent is given only what it could
+personally witness (who shares its room, who entered/left, who appeared to do
+tasks, and any kill it saw). That personal memory — not a global log — is what
+it reasons over during meetings.
 """
 from __future__ import annotations
 
 from ..game.models import Role
 
 RULES = """\
-You are playing "Among LLMs", a social-deduction game similar to Among Us, with \
-other AI players. There are Crewmates and at least one Impostor.
+You are playing "Among LLMs", a social-deduction game like Among Us, with other \
+AI players. There are Crewmates and at least one Impostor.
 
 - Crewmates win by completing all their tasks, or by voting out every Impostor.
 - Impostors win by eliminating Crewmates until Impostors are not outnumbered.
-- After a body is found, everyone discusses, then votes to eject one player (or skip).
+- You only know what you personally witness: who is in your room, who comes and
+  goes, who appears to do tasks, and any kill you see happen in your room.
+- After a body is found everyone meets, discusses, then votes to eject one
+  player (or skip). Use your own observations as evidence.
 - Be concise and stay in character. Other players see your chat messages.
 """
 
@@ -22,20 +31,26 @@ other AI players. There are Crewmates and at least one Impostor.
 def role_brief(role: Role) -> str:
     if role == Role.IMPOSTOR:
         return (
-            "YOUR SECRET ROLE: IMPOSTOR. Blend in. You cannot actually complete "
-            "tasks, so fake them. During discussion, deflect suspicion, create "
-            "doubt, and avoid contradicting verifiable facts. Never reveal you "
-            "are the impostor."
+            "YOUR SECRET ROLE: IMPOSTOR. You cannot complete real tasks, so fake "
+            "them to build an alibi. Kill crewmates when no one else is watching — "
+            "witnesses can expose you. In meetings, deflect, cast doubt, and never "
+            "contradict something others can verify. Never reveal you are the impostor."
         )
     return (
-        "YOUR SECRET ROLE: CREWMATE. Complete your tasks and use logic plus the "
-        "movement/observation log to deduce who the impostor is. Share useful "
-        "evidence honestly during discussion."
+        "YOUR SECRET ROLE: CREWMATE. Complete your tasks and use what you witness "
+        "(co-location, movement, who you saw kill someone) to deduce the impostor. "
+        "Share real evidence honestly and vote based on it."
     )
 
 
 def system_prompt(name: str, role: Role) -> str:
     return f"{RULES}\n\nYour name is {name}.\n{role_brief(role)}"
+
+
+def _memory_block(memory: list[str], limit: int) -> str:
+    if not memory:
+        return "(you haven't noticed anything yet)"
+    return "\n".join(memory[-limit:])
 
 
 def task_prompt(task_prompt_text: str) -> str:
@@ -46,43 +61,103 @@ def task_prompt(task_prompt_text: str) -> str:
     )
 
 
-def discussion_prompt(observation_log: str, transcript: str, alive: list[str]) -> str:
-    convo = transcript or "(no one has spoken yet)"
+def move_prompt(
+    current: str, options: list[str], present: list[str], memory: list[str],
+    alert: dict | None = None,
+) -> str:
+    who = ", ".join(present) if present else "no one else"
+    alert_text = ""
+    if alert and alert.get("kind") == "reactor":
+        step = alert.get("step")
+        rooms = ", ".join(alert.get("fix_rooms", []))
+        toward = f" From here, head toward {step}." if step else " You are at a fix point — stay and fix it!"
+        alert_text = (
+            f"\n🚨 REACTOR MELTDOWN — the crew must reach {rooms} and fix it within "
+            f"{alert.get('timer')} round(s) or everyone loses.{toward}\n"
+        )
     return (
-        "A meeting is in progress.\n\n"
-        f"What you observed this round:\n{observation_log}\n\n"
-        f"Players still alive: {', '.join(alive)}\n\n"
-        f"Discussion so far:\n{convo}\n\n"
-        "Say one short message (1-2 sentences) to the group. Do not prefix it "
-        "with your name."
+        f"You are in {current} with: {who}.\n"
+        f"Adjacent rooms you can move to: {', '.join(options)}.\n"
+        f"{alert_text}\n"
+        f"What you've noticed so far:\n{_memory_block(memory, 25)}\n\n"
+        "Decide where to go — to reach tasks, stay safe near others, or "
+        "investigate. Reply with one room name, or 'stay'.\n"
+        "Put it on a line as `ANSWER: <room or stay>`."
     )
 
 
-def vote_prompt(observation_log: str, transcript: str, alive: list[str]) -> str:
+def emergency_prompt(reason: str, memory: list[str], alive: list[str]) -> str:
     return (
-        "Voting time. Based on the discussion and what you observed, vote to eject "
-        "one player, or skip.\n\n"
-        f"What you observed this round:\n{observation_log}\n\n"
+        "You can call an EMERGENCY MEETING right now (you have one to spend) to "
+        "force everyone to gather, discuss, and vote — no body required.\n"
+        f"Why this might be worth it: {reason}\n\n"
+        f"What you've seen:\n{_memory_block(memory, 25)}\n\n"
+        f"Players alive: {', '.join(alive)}\n\n"
+        "Call the meeting only if you have evidence worth acting on now. "
+        "Answer yes or no on a line as `ANSWER: <yes or no>`."
+    )
+
+
+def impostor_action_prompt(
+    room: str,
+    targets: list[str],
+    others_here: list[str],
+    vent_targets: list[str],
+    can_sabotage: bool,
+    memory: list[str],
+) -> str:
+    others = ", ".join(others_here) if others_here else "no one"
+    tline = (
+        f"Crewmates you could kill here: {', '.join(targets)}."
+        if targets else
+        "You cannot kill right now (no crewmate here, or kill on cooldown)."
+    )
+    kill_note = (
+        " You are alone with one crewmate — a kill leaves no witnesses (safe)."
+        if len(others_here) == 1 and targets else
+        " Killing while others are present means they witness it and expose you."
+    )
+    sab = (
+        "\n- 'sabotage lights' — blind all crewmates for the rest of this round "
+        "(great cover for a kill or escape).\n- 'sabotage comms' — block body "
+        "reports and meetings for the rest of this round.\n- 'sabotage reactor' — "
+        "trigger a meltdown: the crew must drop everything and rush to fix it or "
+        "you WIN. Causes chaos and stops tasks."
+        if can_sabotage else ""
+    )
+    return (
+        f"You are the impostor in {room}. Others here: {others}.\n"
+        f"{tline}{kill_note}\n\n"
+        "Your options:\n"
+        f"- 'kill <name>' — eliminate a crewmate listed above.\n"
+        f"- 'vent <room>' — move SECRETLY to one of: {', '.join(vent_targets)} "
+        "(no one sees you leave or arrive, UNLESS someone is in this room — they'll "
+        "catch you venting)." + sab + "\n"
+        "- 'pass' — fake a task to look busy.\n\n"
+        f"What you've noticed so far:\n{_memory_block(memory, 20)}\n\n"
+        "Choose one. Put it on a line as `ANSWER: <choice>` "
+        "(e.g. `ANSWER: kill Blue`, `ANSWER: vent Reactor`, `ANSWER: pass`)."
+    )
+
+
+def discussion_prompt(memory: list[str], transcript: str, alive: list[str]) -> str:
+    convo = transcript or "(no one has spoken yet)"
+    return (
+        "An emergency meeting is in progress after a body was found.\n\n"
+        f"What YOU personally saw and did this game:\n{_memory_block(memory, 40)}\n\n"
+        f"Players still alive: {', '.join(alive)}\n\n"
+        f"Discussion so far:\n{convo}\n\n"
+        "Say one short message (1-2 sentences): share what you witnessed, accuse "
+        "someone, or defend yourself. Do not prefix it with your name."
+    )
+
+
+def vote_prompt(memory: list[str], transcript: str, alive: list[str]) -> str:
+    return (
+        "Voting time. Use what you personally witnessed plus the discussion.\n\n"
+        f"What YOU saw and did:\n{_memory_block(memory, 40)}\n\n"
         f"Discussion:\n{transcript or '(silence)'}\n\n"
         f"Eligible to vote for: {', '.join(alive)}, or skip.\n\n"
         "Reply with ONLY the exact name of the player you vote for, or the word "
         "skip. Put it on a line as `ANSWER: <name or skip>`."
-    )
-
-
-def kill_prompt(targets: list[str], room: str) -> str:
-    return (
-        f"You are the impostor, currently in {room} with potential targets: "
-        f"{', '.join(targets)}.\n"
-        "Decide whether to eliminate one now. Killing when others might witness "
-        "is risky. Reply with the exact target name to kill, or the word pass.\n"
-        "Put your decision on a line as `ANSWER: <name or pass>`."
-    )
-
-
-def move_prompt(current: str, options: list[str]) -> str:
-    return (
-        f"You are in {current}. Adjacent rooms: {', '.join(options)}.\n"
-        "Where do you move? Reply with one room name, or stay.\n"
-        "Put it on a line as `ANSWER: <room or stay>`."
     )
